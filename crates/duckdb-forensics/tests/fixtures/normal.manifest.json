@@ -1,0 +1,37 @@
+{
+  "cli_asset_sha256": "188a36fe8883ef52e69165a0cbb6031ef679c8e6c448a1ce22951964149b7f96",
+  "cli_asset_url": "https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-osx-arm64.tar.gz",
+  "database_headers": [
+    {
+      "block_alloc_size": 262144,
+      "block_count": 2,
+      "free_list": 144115188075855872,
+      "iteration": 1,
+      "meta_block": 0,
+      "storage_compatibility": 69,
+      "vector_size": 2048
+    },
+    {
+      "block_alloc_size": 262144,
+      "block_count": 0,
+      "free_list": 18446744073709551615,
+      "iteration": 0,
+      "meta_block": 18446744073709551615,
+      "storage_compatibility": 69,
+      "vector_size": 2048
+    }
+  ],
+  "duckdb_version": "v2.0.0",
+  "file_size": 536576,
+  "generator": "scripts/generate_fixture.py",
+  "main_library_version": "v2.0.0",
+  "main_version": 999,
+  "release_url": "https://github.com/duckdb/duckdb/releases/tag/v2.0.0",
+  "sha256": "bc8454a03157e2a9e43c2b253e7bde10244107f40f42121faddc7a715171292b",
+  "sql": "CREATE TABLE fixture (id INTEGER, label VARCHAR);\nINSERT INTO fixture VALUES (1, 'alpha'), (2, 'beta');\nCHECKPOINT;\n",
+  "stored_checksums": [
+    "0x077463d1924660aa",
+    "0xfeac92ab5d551913",
+    "0xd583313a0973c76d"
+  ]
+}
