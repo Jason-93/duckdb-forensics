@@ -1,0 +1,61 @@
+{
+  "checkpoint": {
+    "block_pointer": 42,
+    "entry_index": 1,
+    "entry_offset": 51,
+    "offset_within_block": 7
+  },
+  "checkpoint_iteration": 7,
+  "confirmed_flush_offsets": [
+    30,
+    82
+  ],
+  "duckdb_source_commit": "d54cbbe3df17e8e5ce68312f483b4155836112aa",
+  "duckdb_source_tag": "v2.0.0",
+  "entries": [
+    {
+      "actual_frame_end": 51,
+      "actual_length": 5,
+      "declared_frame_end": 51,
+      "declared_length": 5,
+      "entry_type": "wal_flush",
+      "index": 0,
+      "offset": 30,
+      "payload_offset": 46,
+      "stored_checksum": "0x5e3ded2f727dfee7"
+    },
+    {
+      "actual_frame_end": 82,
+      "actual_length": 15,
+      "declared_frame_end": 82,
+      "declared_length": 15,
+      "entry_type": "checkpoint",
+      "index": 1,
+      "offset": 51,
+      "payload_offset": 67,
+      "stored_checksum": "0xd182293d27b39cac"
+    },
+    {
+      "actual_frame_end": 103,
+      "actual_length": 5,
+      "declared_frame_end": 103,
+      "declared_length": 5,
+      "entry_type": "wal_flush",
+      "index": 2,
+      "offset": 82,
+      "payload_offset": 98,
+      "stored_checksum": "0x5e3ded2f727dfee7"
+    }
+  ],
+  "file_size": 103,
+  "first_flush_end": 51,
+  "generator": "scripts/generate_wal_fixtures.py",
+  "last_good_flush": {
+    "end_offset": 103,
+    "entry_index": 2,
+    "entry_offset": 82
+  },
+  "sha256": "44a1b2d4ce11627d469e283d003f78b25f4648c8cd6c8872facd3326fc60468f",
+  "version": 2,
+  "version_header_length": 30
+}

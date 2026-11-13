@@ -9,7 +9,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use duckdb_forensics::inspect::{InspectError, inspect_path};
 use duckdb_forensics::output::{OutputError, write_report};
+use duckdb_forensics::wal::{WalInspectError, inspect_wal_path};
 use duckdb_report::render_text;
+use duckdb_report::wal::render_wal_text;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +37,15 @@ enum Command {
         #[arg(long, help = "Hide the normalized input path in the report")]
         hide_path: bool,
     },
+    #[command(about = "Inspect unencrypted DuckDB WAL v2 frames without replay")]
+    Wal {
+        #[arg(value_name = "WAL_PATH")]
+        wal_path: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -46,6 +57,7 @@ enum OutputFormat {
 #[derive(Debug)]
 enum AppError {
     Inspect(InspectError),
+    WalInspect(WalInspectError),
     Serialize(serde_json::Error),
     Output(OutputError),
     Stdout(io::Error),
@@ -55,6 +67,7 @@ impl Display for AppError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Inspect(error) => Display::fmt(error, formatter),
+            Self::WalInspect(error) => Display::fmt(error, formatter),
             Self::Serialize(error) => write!(formatter, "cannot serialize JSON report: {error}"),
             Self::Output(error) => Display::fmt(error, formatter),
             Self::Stdout(error) => write!(formatter, "cannot write report to stdout: {error}"),
@@ -94,6 +107,29 @@ fn run(cli: Cli) -> Result<(), AppError> {
             };
             if let Some(output) = output {
                 write_report(&output, &db_path, &rendered).map_err(AppError::Output)
+            } else {
+                io::stdout()
+                    .write_all(rendered.as_bytes())
+                    .map_err(AppError::Stdout)
+            }
+        }
+        Command::Wal {
+            wal_path,
+            format,
+            output,
+        } => {
+            let report = inspect_wal_path(&wal_path).map_err(AppError::WalInspect)?;
+            let rendered = match format {
+                OutputFormat::Text => render_wal_text(&report),
+                OutputFormat::Json => {
+                    let mut json =
+                        serde_json::to_string_pretty(&report).map_err(AppError::Serialize)?;
+                    json.push('\n');
+                    json
+                }
+            };
+            if let Some(output) = output {
+                write_report(&output, &wal_path, &rendered).map_err(AppError::Output)
             } else {
                 io::stdout()
                     .write_all(rendered.as_bytes())

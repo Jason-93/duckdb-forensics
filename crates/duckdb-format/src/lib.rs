@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod wal;
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
@@ -301,16 +303,66 @@ pub fn checked_block_location(block_id: u64, block_alloc_size: u64) -> Result<u6
 }
 
 pub fn duckdb_checksum(buffer: &[u8]) -> u64 {
-    let mut result = 5381_u64;
-    let (chunks, remainder) = buffer.as_chunks::<8>();
-    for chunk in chunks {
-        let word = u64::from_le_bytes(*chunk);
-        result ^= word.wrapping_mul(CHECKSUM_WORD_MULTIPLIER);
+    let mut checksum = DuckDbChecksum::new();
+    checksum.update(buffer);
+    checksum.finalize()
+}
+
+#[derive(Debug, Clone)]
+pub struct DuckDbChecksum {
+    result: u64,
+    remainder: [u8; 8],
+    remainder_len: usize,
+}
+
+impl Default for DuckDbChecksum {
+    fn default() -> Self {
+        Self::new()
     }
-    if !remainder.is_empty() {
-        result ^= checksum_remainder(remainder);
+}
+
+impl DuckDbChecksum {
+    pub fn new() -> Self {
+        Self {
+            result: 5381,
+            remainder: [0; 8],
+            remainder_len: 0,
+        }
     }
-    result
+
+    pub fn update(&mut self, mut buffer: &[u8]) {
+        if self.remainder_len != 0 {
+            let needed = 8 - self.remainder_len;
+            let copied = needed.min(buffer.len());
+            self.remainder[self.remainder_len..self.remainder_len + copied]
+                .copy_from_slice(&buffer[..copied]);
+            self.remainder_len += copied;
+            buffer = &buffer[copied..];
+            if self.remainder_len == 8 {
+                let word = u64::from_le_bytes(self.remainder);
+                self.result ^= word.wrapping_mul(CHECKSUM_WORD_MULTIPLIER);
+                self.remainder_len = 0;
+            }
+        }
+        if self.remainder_len != 0 {
+            return;
+        }
+
+        let (chunks, remainder) = buffer.as_chunks::<8>();
+        for chunk in chunks {
+            let word = u64::from_le_bytes(*chunk);
+            self.result ^= word.wrapping_mul(CHECKSUM_WORD_MULTIPLIER);
+        }
+        self.remainder[..remainder.len()].copy_from_slice(remainder);
+        self.remainder_len = remainder.len();
+    }
+
+    pub fn finalize(mut self) -> u64 {
+        if self.remainder_len != 0 {
+            self.result ^= checksum_remainder(&self.remainder[..self.remainder_len]);
+        }
+        self.result
+    }
 }
 
 fn checksum_remainder(buffer: &[u8]) -> u64 {
@@ -401,6 +453,23 @@ mod tests {
             duckdb_checksum(&1_u64.to_le_bytes()),
             5381 ^ CHECKSUM_WORD_MULTIPLIER
         );
+    }
+
+    #[test]
+    fn streaming_checksum_matches_one_shot_for_every_split() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let expected = duckdb_checksum(&bytes);
+        for split in 0..=bytes.len() {
+            let mut checksum = DuckDbChecksum::new();
+            checksum.update(&bytes[..split]);
+            checksum.update(&bytes[split..]);
+            assert_eq!(checksum.finalize(), expected, "split {split}");
+        }
+        let mut bytewise = DuckDbChecksum::new();
+        for byte in &bytes {
+            bytewise.update(&[*byte]);
+        }
+        assert_eq!(bytewise.finalize(), expected);
     }
 
     #[test]

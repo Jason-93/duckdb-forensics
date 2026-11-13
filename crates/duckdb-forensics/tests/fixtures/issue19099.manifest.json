@@ -1,0 +1,19 @@
+{
+  "cut_offset": 109,
+  "generator": "scripts/generate_wal_fixtures.py",
+  "last_entry_declared_length": 135,
+  "last_entry_offset": 29,
+  "last_entry_payload_offset": 45,
+  "last_good_flush_end": 29,
+  "original_sha256": "6403a29cafece37383df8601d8b6f12e7ba5fccf33be8a789e17d299310ba6a3",
+  "original_size": 180,
+  "purpose": "Historical test corpus only; no claim about current DuckDB behavior.",
+  "reference_issue": 19099,
+  "truncated_actual_length": 64,
+  "truncated_sha256": "5091ce42e8c87a5ab7d6e4936acecd64c60d3e28690f25c98957b4d8d469e70d",
+  "truncated_size": 109,
+  "zero_filled_sha256": "df1918a62ff495514dd284ea0b437bc2390d7de5e7844de9fe0d0f011e5d6da2",
+  "zero_filled_size": 180,
+  "zero_suffix_length": 71,
+  "zero_suffix_offset": 109
+}

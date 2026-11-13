@@ -23,6 +23,21 @@ Primary sources:
 - [`src/storage/metadata/metadata_manager.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/metadata/metadata_manager.cpp)
 - [`src/storage/checkpoint_manager.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/checkpoint_manager.cpp)
 
+WAL-specific sources:
+
+- [`src/storage/write_ahead_log.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/write_ahead_log.cpp)
+- [`src/storage/wal_replay.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/wal_replay.cpp)
+- [`src/include/duckdb/storage/write_ahead_log.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/write_ahead_log.hpp)
+- [`src/include/duckdb/storage/wal_entry.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/wal_entry.hpp)
+- [`src/include/duckdb/common/enums/wal_type.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/common/enums/wal_type.hpp)
+- [`src/common/serializer/binary_serializer.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/common/serializer/binary_serializer.cpp)
+- [`src/common/serializer/binary_deserializer.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/common/serializer/binary_deserializer.cpp)
+- [`src/include/duckdb/common/serializer/binary_deserializer.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/common/serializer/binary_deserializer.hpp)
+- [`src/include/duckdb/common/serializer/serialization_traits.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/common/serializer/serialization_traits.hpp)
+- [`src/include/duckdb/common/serializer/encoding_util.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/common/serializer/encoding_util.hpp)
+- [`src/storage/serialization/serialize_wal.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/serialization/serialize_wal.cpp)
+- [`src/storage/serialization/serialize_storage.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/serialization/serialize_storage.cpp)
+
 ## Scalar representation
 
 `WriteStream::Write<T>` writes the in-memory representation of a standard-layout scalar. `ReadStream::Read<T>` reads that representation directly, and `Load<T>` uses `memcpy`. These functions do not perform byte-order conversion.
@@ -161,6 +176,88 @@ The decoded meta-block and free-list block ids are converted to offsets only wit
 
 The independently generated `normal.manifest.json` records the release URL, asset digest, fixture SHA-256, raw header fields, and stored checksums. DuckDB generates a random database identifier, so regeneration is procedurally repeatable but is not expected to be byte-for-byte identical.
 
+`normal.wal` and the Issue #19099 corpus are generated deterministically by `scripts/generate_wal_fixtures.py`. That independent stdlib-only generator implements the source-defined field IDs, LEB128, frame layout, and checksum without invoking DuckDB or the Rust parser. `normal.wal.manifest.json` records every expected Entry offset, declared/actual length, checksum, Flush boundary, and Checkpoint field. The historical manifest records the common cut and both hashes. Tests use these independent expectations rather than expectations produced by the Rust parser.
+
+## Unframed WAL version object
+
+DuckDB v2.0.0 defines `WAL_VERSION_NUMBER = 2` and `WAL_ENCRYPTED_VERSION_NUMBER = 3` in `write_ahead_log.cpp`. The first WAL object is **not** a v2 length/checksum frame and explicitly has no checksum. `WriteAheadLog::WriteHeader` serializes it directly to the file writer:
+
+| Order | Encoding | Meaning |
+|---:|---|---|
+| 1 | little-endian `uint16_t` field ID 100 | `wal_type` property |
+| 2 | unsigned LEB128 `uint8_t` value 98 | `WALType::WAL_VERSION` |
+| 3 | little-endian `uint16_t` field ID 101 | `version` property |
+| 4 | unsigned LEB128 `uint64_t` | WAL version |
+| 5 | optional field ID 102, LEB128 list length 16, sixteen LEB128 bytes | database identifier for the v2.0.0 writer |
+| 6 | optional field ID 103 and LEB128 `optional_idx` | checkpoint iteration; `UINT64_MAX` means unset |
+| 7 | little-endian `uint16_t` `0xffff` | root object terminator |
+
+The parser determines the first frame offset from the consumed object length, not a fixed header size. It accepts only version 2 for framed analysis. Version 1, encrypted version 3, and other versions produce `unsupported_wal_version` with `status=unsupported`; their following bytes are not parsed as v2. A malformed initial object produces `invalid_wal_header` rather than a guessed version.
+
+`field_id_t` is `uint16_t` and `MESSAGE_TERMINATOR_FIELD_ID` is `0xffff` in `serialization_traits.hpp`. `BinarySerializer::OnPropertyBegin` writes the raw field ID. `BinaryDeserializer::ReadUnsignedInt8` and `ReadUnsignedInt64` use `EncodingUtil::DecodeLEB128`. This is why the first Payload byte is **not** the `WALType`.
+
+## WAL v2 frames and checksum
+
+`ChecksumWriter::Flush` and `WriteAheadLogDeserializer::GetEntryDeserializer` establish this unencrypted v2 layout:
+
+| Frame-relative offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | little-endian declared Payload length |
+| 8 | 8 | little-endian stored checksum |
+| 16 | declared length | serialized Payload |
+
+The checksum is the same `Checksum` algorithm documented above, computed over exactly the Payload and excluding both 8-byte frame fields. The inspector streams the Payload through 1 MiB buffers and never allocates the declared Entry length. Its `actual_length` is the number of Payload bytes physically present, capped at the declaration. `actual_frame_length` includes available frame-header bytes. All end-offset calculations use checked arithmetic.
+
+A zero declaration or overflowing end is `invalid_entry_length`. Fewer than 16 remaining bytes is `truncated_entry`. A complete header whose declaration exceeds the remaining file produces `entry_exceeds_remaining_file`; when the file ends inside the Payload, `truncated_entry` is also reported. A complete frame with a different computed checksum produces `checksum_mismatch`. These are structural or integrity observations, not proof of a particular physical failure.
+
+After a structural error the scanner does not guess a new frame boundary. A complete frame with a checksum/type error can be skipped by its declared physical length for further observations, but the trusted sequential prefix ends at the first such Entry. Reports distinguish `first_unparsed_offset`, `first_checksum_mismatch_offset`, and the physical `scan_stop_offset`.
+
+## WALType envelope and supported Payload decoding
+
+Every regular Entry starts with field ID 100 followed by the LEB128-encoded underlying `uint8_t` enum value. The root object ends with field ID `0xffff`; other properties occur between the type and that terminator. The inspector decodes only this envelope for ordinary entries and sets `payload_status=not_decoded`. It does not emit Insert, Update, Catalog, or other business Payload contents. If field 100, the LEB128 value, or the enum mapping cannot be decoded reliably, `entry_type=unknown` and the offset/length/checksum evidence remains available.
+
+The v2.0.0 `wal_type.hpp` mapping is:
+
+| Value | Name | Value | Name |
+|---:|---|---:|---|
+| 0 | INVALID | 20 | ALTER_INFO |
+| 1 | CREATE_TABLE | 21 | CREATE_TABLE_MACRO |
+| 2 | DROP_TABLE | 22 | DROP_TABLE_MACRO |
+| 3 | CREATE_SCHEMA | 23 | CREATE_INDEX |
+| 4 | DROP_SCHEMA | 24 | DROP_INDEX |
+| 5 | CREATE_VIEW | 25 | USE_TABLE |
+| 6 | DROP_VIEW | 26 | INSERT_TUPLE |
+| 8 | CREATE_SEQUENCE | 27 | DELETE_TUPLE |
+| 9 | DROP_SEQUENCE | 28 | UPDATE_TUPLE |
+| 10 | SEQUENCE_VALUE | 29 | ROW_GROUP_DATA |
+| 11 | CREATE_MACRO | 30 | CREATE_TRIGGER |
+| 12 | DROP_MACRO | 31 | DROP_TRIGGER |
+| 13 | CREATE_TYPE | 98 | WAL_VERSION |
+| 14 | DROP_TYPE | 99 | CHECKPOINT |
+| 100 | WAL_FLUSH | | |
+
+`WriteAheadLog::Flush` writes an otherwise empty `WAL_FLUSH` object and then syncs the writer. The inspector confirms a Flush only for a checksum-valid five-byte Payload containing field 100, value 100, and the root terminator. A type marker with additional or malformed content is not a confirmed Flush.
+
+`confirmed_flushes` records physical Entry and end offsets. `last_good_flush` is stricter: every frame from the version object through that Flush must be complete, checksum-valid, and have a trusted type envelope, and the Flush itself must pass the exact check. A later valid Flush cannot repair continuity after an earlier error. If no such boundary exists, `last_good_flush` is `null`; it is never fabricated from a length or type guess.
+
+The last verified Flush is **not** claimed to be the last successful commit acknowledged by the application. `unterminated_data_after_last_flush` reports bytes beyond that boundary, including complete Entries without a later Flush. It is not a recovery instruction. This phase neither proposes a safe recovery point nor performs candidate truncation.
+
+## Checkpoint Marker
+
+`WALCheckpoint::Deserialize` reads required property 101 as a nested `MetaBlockPointer`. `serialize_storage.cpp` defines its optional properties 100 (`block_pointer`, `idx_t`) and 101 (`offset`, `uint32_t`), followed by nested and root object terminators. The inspector outputs `checkpoint_marker` only when this complete shape and the frame checksum validate. It reports the packed `block_pointer` and `offset_within_block`; it does not follow the pointer or decode Catalog/storage contents. Otherwise the marker is `null` with an unknown or invalid-Payload diagnostic.
+
+## Tail evidence and trailing data
+
+The tail report distinguishes the unparsed/integrity-failed region from the physical scan stop. It records whether that region is entirely zero and independently locates a nonempty all-zero suffix reaching EOF. `zero_filled_tail` is direct byte evidence plus a low-confidence inference about possible explanations; it does not prove torn write, filesystem behavior, or a recovery action. Nonzero bytes left after structural parsing stops produce `unparsed_trailing_data`. A zero-length tail has `all_zero=null` and produces neither finding.
+
+The committed Issue #19099 corpus contains two files derived from the same bytes at the same in-Entry cut: one is truncated there, and the other is zero-filled from there to the original EOF. Their shared offset and hashes are independently recorded. This is historical test data only; no assertion is made that the Issue still exists in current DuckDB.
+
+## WAL coverage, unknowns, and resource limits
+
+The WAL JSON Schema is `schemas/wal-report.schema.json`. Coverage separates bytes consumed by frame scanning from bytes belonging to physically complete frames; neither percentage claims business Payload decoding. Unknowns identify unknown types, intentionally undecoded Payloads, unavailable integrity results, and missing trusted Flush boundaries.
+
+Defaults are a 1 TiB file budget, 1,000,000 Entry candidates, and 256 MiB declared Payload per Entry. Hashing and Payload checksum reads are chunked. Reaching a budget produces `resource_limit_reached` and a stop offset, not a corruption verdict. A file rejected by the initial size budget has `sha256=null`; later fields and tail facts remain unknown.
+
 ## Confirmed but deliberately not implemented
 
 - Encrypted Database Header decryption, encrypted checksum validation, and encrypted blocks.
@@ -171,10 +268,11 @@ The independently generated `normal.manifest.json` records the release URL, asse
 - Meta-block/free-list payload parsing beyond the packed-pointer geometry above.
 - Block payload checksums and content validation.
 - Row Groups, column compression, and row-level data.
-- WAL discovery, replay, or WAL entry semantics.
+- WAL replay, transaction reconstruction, business Payload decoding, or Catalog/Row Group semantics.
+- WAL v1 framing, encrypted WAL v3 decryption, and unknown WAL versions.
 - Repair, truncation, checkpointing, recovery, or generation of a replacement database.
 
-The source files `wal_replay.cpp` and `wal_entry.hpp` are intentionally not used to infer any phase-1 structure. No WAL parser is implemented.
+The source files `wal_replay.cpp` and `wal_entry.hpp` are used only to establish the offline frame/envelope behavior documented above. The inspector never invokes DuckDB replay.
 
 ## Unknown or not asserted
 

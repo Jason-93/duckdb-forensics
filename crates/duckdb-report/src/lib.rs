@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod wal;
+
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
