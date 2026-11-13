@@ -18,6 +18,7 @@ pub const MAX_BLOCK_ALLOC_SIZE: u64 = 262_144;
 pub const STANDARD_VECTOR_SIZE: u64 = 2048;
 pub const MAXIMUM_BLOCK: u64 = 4_611_686_018_427_388_000;
 pub const INVALID_BLOCK: u64 = u64::MAX;
+pub const METADATA_BLOCK_COUNT: u64 = 64;
 
 const CHECKSUM_WORD_MULTIPLIER: u64 = 0xbf58_476d_1ce4_e5b9;
 const CHECKSUM_REMAINDER_MULTIPLIER: u64 = 0xc6a4_a793_5bd1_e995;
@@ -302,6 +303,29 @@ pub fn checked_block_location(block_id: u64, block_alloc_size: u64) -> Result<u6
         .ok_or(GeometryError::FileEndOverflow)
 }
 
+pub fn unpack_metadata_pointer(raw_pointer: u64) -> (u64, u64) {
+    (raw_pointer & 0x00ff_ffff_ffff_ffff, raw_pointer >> 56)
+}
+
+pub fn metadata_block_size(block_alloc_size: u64) -> u64 {
+    (block_alloc_size.saturating_sub(DEFAULT_BLOCK_HEADER_SIZE as u64) / METADATA_BLOCK_COUNT) & !7
+}
+
+pub fn checked_metadata_location(
+    block_id: u64,
+    metadata_index: u64,
+    block_alloc_size: u64,
+) -> Result<u64, GeometryError> {
+    let block_offset = checked_block_location(block_id, block_alloc_size)?;
+    let relative_offset = metadata_index
+        .checked_mul(metadata_block_size(block_alloc_size))
+        .ok_or(GeometryError::ByteLengthOverflow)?;
+    block_offset
+        .checked_add(DEFAULT_BLOCK_HEADER_SIZE as u64)
+        .and_then(|offset| offset.checked_add(relative_offset))
+        .ok_or(GeometryError::FileEndOverflow)
+}
+
 pub fn duckdb_checksum(buffer: &[u8]) -> u64 {
     let mut checksum = DuckDbChecksum::new();
     checksum.update(buffer);
@@ -492,6 +516,17 @@ mod tests {
             verify_block_alloc_size(0),
             Err(BlockAllocSizeError::NotPowerOfTwo(0))
         );
+    }
+
+    #[test]
+    fn metadata_geometry_matches_v2_layout() {
+        assert_eq!(metadata_block_size(DEFAULT_BLOCK_ALLOC_SIZE), 4088);
+        assert_eq!(unpack_metadata_pointer(0x0200_0000_0000_0000), (0, 2));
+        assert_eq!(
+            checked_metadata_location(0, 2, DEFAULT_BLOCK_ALLOC_SIZE),
+            Ok(20_472)
+        );
+        assert_eq!(metadata_block_size(0), 0);
     }
 
     #[test]

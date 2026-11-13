@@ -155,6 +155,17 @@ def main():
             if header["vector_size"] != 2048:
                 raise RuntimeError(f"expected vector size 2048, got {header}")
 
+        active_header = headers[0] if headers[0]["iteration"] > headers[1]["iteration"] else headers[1]
+        block_alloc_size = active_header["block_alloc_size"]
+        metadata_block_size = ((block_alloc_size - 8) // 64) & ~7
+        metadata_next_pointers = {}
+        for name in ("meta_block", "free_list"):
+            pointer = active_header[name]
+            block_id = pointer & 0x00FFFFFFFFFFFFFF
+            metadata_index = pointer >> 56
+            location = 12_288 + block_id * block_alloc_size + 8 + metadata_index * metadata_block_size
+            metadata_next_pointers[name] = struct.unpack_from("<Q", data, location)[0]
+
         fixture = args.output_dir / "normal.duckdb"
         manifest_path = args.output_dir / "normal.manifest.json"
         fixture_tmp = args.output_dir / ".normal.duckdb.tmp"
@@ -171,6 +182,12 @@ def main():
             "sha256": sha256(database),
             "main_version": main_version,
             "main_library_version": data[52:84].split(b"\0", 1)[0].decode("ascii"),
+            "block_stored_checksums": [
+                f"0x{struct.unpack_from('<Q', data, 12_288 + block_id * block_alloc_size)[0]:016x}"
+                for block_id in range(active_header["block_count"])
+            ],
+            "metadata_block_size": metadata_block_size,
+            "metadata_next_pointers": metadata_next_pointers,
             "stored_checksums": [
                 f"0x{struct.unpack_from('<Q', data, offset)[0]:016x}"
                 for offset in (0, 4096, 8192)

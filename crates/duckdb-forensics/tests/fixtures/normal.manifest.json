@@ -21,11 +21,20 @@
       "vector_size": 2048
     }
   ],
+  "block_stored_checksums": [
+    "0xedd49ecb6bc83315",
+    "0xbb1c9db7942e0354"
+  ],
   "duckdb_version": "v2.0.0",
   "file_size": 536576,
   "generator": "scripts/generate_fixture.py",
   "main_library_version": "v2.0.0",
   "main_version": 999,
+  "metadata_block_size": 4088,
+  "metadata_next_pointers": {
+    "free_list": 18446744073709551615,
+    "meta_block": 18446744073709551615
+  },
   "release_url": "https://github.com/duckdb/duckdb/releases/tag/v2.0.0",
   "sha256": "bc8454a03157e2a9e43c2b253e7bde10244107f40f42121faddc7a715171292b",
   "sql": "CREATE TABLE fixture (id INTEGER, label VARCHAR);\nINSERT INTO fixture VALUES (1, 'alpha'), (2, 'beta');\nCHECKPOINT;\n",

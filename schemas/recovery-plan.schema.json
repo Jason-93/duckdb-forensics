@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/duckdb-forensics/recovery-plan.schema.json",
+  "title": "duckdb-forensics advisory recovery plan",
+  "description": "Observations and candidate advice only. No action is executed and no lossless or uniquely certain recovery is claimed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "status", "evidence_dir", "observed_facts", "findings", "inferences", "unknowns", "candidate_actions", "risks"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "tool_version": { "type": "string" },
+    "status": { "enum": ["complete", "incomplete"] },
+    "evidence_dir": { "type": "string" },
+    "observed_facts": { "$ref": "#/$defs/observedFacts" },
+    "findings": { "type": "array", "items": { "type": "object" } },
+    "inferences": { "type": "array", "items": { "type": "object" } },
+    "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
+    "candidate_actions": { "type": "array", "items": { "$ref": "#/$defs/candidateAction" } },
+    "risks": { "type": "array", "items": { "$ref": "#/$defs/risk" } }
+  },
+  "$defs": {
+    "offset": { "type": "integer", "minimum": 0 },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_size", "sha256"],
+      "properties": {
+        "path": { "type": "string" },
+        "file_size": { "$ref": "#/$defs/offset" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "observedFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "evidence_unchanged", "database", "wal", "oracle"],
+      "properties": {
+        "files": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+        "evidence_unchanged": { "type": "boolean" },
+        "database": { "anyOf": [{ "$ref": "verify-report.schema.json" }, { "type": "null" }] },
+        "wal": { "anyOf": [{ "$ref": "wal-report.schema.json" }, { "type": "null" }] },
+        "oracle": {
+          "anyOf": [
+            { "$ref": "verify-report.schema.json#/$defs/oracle" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "unknown": {
+      "type": "object",
+      "required": ["code", "structure_path", "reason"],
+      "properties": {
+        "code": { "type": "string" },
+        "structure_path": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "possibleDataLoss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_offset", "end_offset", "byte_length", "description"],
+      "properties": {
+        "start_offset": { "$ref": "#/$defs/offset" },
+        "end_offset": { "$ref": "#/$defs/offset" },
+        "byte_length": { "$ref": "#/$defs/offset" },
+        "description": { "type": "string" }
+      }
+    },
+    "candidateAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "target_wal", "target_offset", "evidence", "possible_data_loss", "must_execute_on_copy", "must_reverify_result", "manual_steps"],
+      "properties": {
+        "action": { "const": "candidate_wal_truncation" },
+        "target_wal": { "type": "string" },
+        "target_offset": { "$ref": "#/$defs/offset" },
+        "evidence": { "type": "array", "minItems": 1 },
+        "possible_data_loss": { "$ref": "#/$defs/possibleDataLoss" },
+        "must_execute_on_copy": { "const": true },
+        "must_reverify_result": { "const": true },
+        "manual_steps": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A read-only, offline crash-site inspector for DuckDB database and WAL files. Phase 1 examines the DuckDB v2.0.0 main file, its three fixed header pages, and basic block geometry. Phase 2 examines unencrypted WAL v2 frames without replay. Reports provide offset-backed observations, findings, explicitly separated inferences, and coverage in text or JSON.
+A read-only, offline crash-site inspector for DuckDB database and WAL files. It examines DuckDB v2.0.0 headers, block geometry/checksums, metadata chains, and unencrypted WAL v2 frames without replay. It can also produce advisory recovery plans and compare Rust analysis with an explicitly supplied official DuckDB v2.0.0 executable on temporary copies. Reports provide offset-backed observations, findings, explicitly separated inferences, and coverage in text or JSON.
 
 The parser is implemented in Rust without `duckdb-rs`, DuckDB C++, or `unsafe` code. It never opens the evidence through DuckDB.
 
@@ -16,6 +16,13 @@ The parser is implemented in Rust without `duckdb-rs`, DuckDB C++, or `unsafe` c
 - Iteration-based likely-active-header selection with damage-aware diagnostics.
 - Block allocation size/count validation and checked file-length geometry.
 - Streaming file SHA-256 and normalized or hidden input path.
+
+For `verify`, the supported scope additionally includes:
+
+- Streaming checksums for complete plaintext blocks, with isolated per-block diagnostics.
+- Truncated and out-of-bounds blocks, recorded-count geometry, and non-aligned trailing data.
+- Bounded `meta_block` and `free_list` chain traversal with pointer bounds, length, and cycle checks.
+- Explicit checked, unchecked, unsupported, and unavailable coverage. Unvisited blocks are not called healthy or assigned an allocation verdict.
 
 For `wal`, the supported scope is narrower:
 
@@ -32,7 +39,7 @@ Encrypted database files are identified from the Main Header. Their encrypted Da
 
 ## Non-goals
 
-These phases do not support DuckDB v1.x main files, WAL v1/v3 framing, encrypted-content decoding, big-endian files, alternate block-header sizes, DuckLake, Parquet, MotherDuck, Catalog deserialization, free-list/meta-block payload decoding, Row Groups, column compression, business-data output, row recovery, WAL replay, recovery plans, automatic repair, checkpointing, truncation, or replacement database generation.
+These phases do not support DuckDB v1.x main files, WAL v1/v3 framing, encrypted-content decoding, big-endian files, alternate block-header sizes, DuckLake, Parquet, MotherDuck, Catalog deserialization, free-list/meta-block payload decoding, Row Groups, column compression, business-data output, row recovery, WAL replay, automatic repair, checkpointing, truncation, or replacement database generation. Recovery plans are advisory only; no candidate action is executed by the tool.
 
 A passing report is not a claim that the database is healthy or that DuckDB can open it. See [FORMAT_NOTES.md](FORMAT_NOTES.md) for source-backed layout details and unchecked areas.
 
@@ -80,6 +87,32 @@ duckdb-forensics wal evidence.duckdb.wal --format json --output wal-report.json
 
 This command reads only the supplied WAL. It does not open the original database through DuckDB, replay Entries, write to the WAL, or truncate it. The WAL JSON contract is documented in [`schemas/wal-report.schema.json`](schemas/wal-report.schema.json).
 
+## Verify a main file
+
+```sh
+duckdb-forensics verify <DB_PATH> [--blocks] [--format text|json] [--duckdb PATH]
+```
+
+The default verifies headers, selected-header geometry, and the selected `meta_block`/`free_list` chains, including checksums for blocks those chains visit. `--blocks` additionally streams and checksums every complete physical block. A damaged block does not stop independent later checks. Extra blocks after `block_count` are reported separately because DuckDB can treat them as implicitly free-listed; unvisited blocks are never assigned an allocation verdict. Repeated references are not automatically corruption, and cycle detection is local to each chain.
+
+The report distinguishes truncated blocks, out-of-bounds references, trailing bytes, unsupported encrypted regions, and unavailable coverage. A `complete` status or valid checksum is not a claim that DuckDB can open the database or that catalog/business contents are healthy. See [`schemas/verify-report.schema.json`](schemas/verify-report.schema.json).
+
+## Generate an advisory recovery plan
+
+```sh
+duckdb-forensics recover-plan <EVIDENCE_DIR> [--format text|json] [--duckdb PATH]
+```
+
+The command inventories and hashes every regular file recursively, analyzes one unambiguous top-level `.duckdb` and its exact companion `.wal`, then rechecks the original inventory and hashes. It never executes recovery. Its JSON always separates `observed_facts`, `findings`, `inferences`, `unknowns`, `candidate_actions`, and `risks`; see [`schemas/recovery-plan.schema.json`](schemas/recovery-plan.schema.json).
+
+When a continuously verified `last_good_flush` ends before EOF, a `candidate_wal_truncation` suggestion records the target offset, WAL hash and Flush evidence, and the possible loss interval `[target_offset, wal_file_size)`. That interval can contain complete Entries without a later Flush, so transaction/row loss is unknown. The action requires execution on a copy and full reverification. No boundary, an EOF boundary, resource-limited analysis, missing files, or ambiguous databases produce no such action. The tool never truncates, deletes, renames, or overwrites evidence and never claims lossless recovery.
+
+## Optional official DuckDB Oracle
+
+Both new commands accept `--duckdb PATH` only for an explicitly supplied official DuckDB v2.0.0 executable. There is no automatic discovery or download. The tool first checks `SELECT version()` in `:memory:`, copies the database and associated WAL to a temporary workspace, disables known-extension autoinstall/autoload through controlled initialization, and only then opens the copy with `ATTACH ... (READ_ONLY)` and a minimal read-only query. Original paths are never passed to DuckDB.
+
+Every invocation records its full argv, exit status, stderr/stdout (bounded to 64 KiB per stream with truncation flags), and a default 30-second timeout. Timeout processes are killed and reaped. The comparison is `agreement`, `disagreement`, or `not_comparable` with a rationale. Oracle success does not override checksum findings or prove unvisited content healthy; unexplained Rust/Oracle differences are reported as `disagreement` rather than hidden.
+
 The inspector returns exit code 0 when an inspection completes, including reports containing corruption or unsupported-feature findings. Usage, input I/O, serialization, and output-safety failures return exit code 2.
 
 ## Report model
@@ -100,14 +133,19 @@ WAL JSON independently uses schema version `1` and reports version/encryption st
 
 `last_good_flush` requires a continuously complete, checksum-valid, type-validated prefix ending in an exact WAL_FLUSH. It is not necessarily the last commit acknowledged by the application and is not a safe recovery point. `confirmed_flushes` can additionally contain later physically valid Flush objects after an earlier error; they do not restore continuity. Checksum mismatch alone does not prove torn write, and a zero-filled tail is only evidence.
 
+Verify JSON independently uses schema version `1` and adds selected-header details, bounded block anomalies, metadata-chain termination/capacity/cycle status, trailing-data classification, and explicit integrity coverage. Recovery-plan JSON independently uses schema version `1`; its candidate actions are data objects, not executable instructions.
+
 Stable main-file finding codes include `invalid_magic`, `checksum_mismatch`, `truncated_file`, `unsupported_storage_version`, `unsupported_encryption`, `invalid_block_alloc_size`, `invalid_block_count`, `invalid_metadata_pointer`, `invalid_block_reference`, `geometry_overflow`, `no_valid_database_header`, and `limit_reached`.
 
 WAL finding codes are `empty_wal`, `unsupported_wal_version`, `invalid_wal_header`, `invalid_entry_length`, `entry_exceeds_remaining_file`, `checksum_mismatch`, `truncated_entry`, `zero_filled_tail`, `unparsed_trailing_data`, and `resource_limit_reached`. A declaration that exceeds EOF can carry both the out-of-bounds and truncated classifications.
 
+Additional verify findings include `truncated_block`, `block_out_of_bounds`, `trailing_data`, `beyond_header_block_count`, and `meta_block_cycle`. Recovery/Oracle findings include `evidence_incomplete`, `evidence_changed_during_analysis`, and `oracle_disagreement`.
+
 ## Read-only and output safety
 
-- `DB_PATH` and `WAL_PATH` are opened read-only. The inspector does not invoke DuckDB, create a WAL, trigger a checkpoint, replay a WAL, or modify either input.
-- The only optional write is the report supplied through `--output`.
+- `DB_PATH`, `WAL_PATH`, and `EVIDENCE_DIR` inputs are opened read-only. Without `--duckdb`, the tool does not invoke DuckDB, create a WAL, trigger a checkpoint, replay a WAL, or modify any input.
+- Oracle writes are confined to a temporary copy workspace. The original evidence is hashed again after recovery-plan analysis.
+- For `inspect` and `wal`, the only optional write is the report supplied through `--output`. `verify` and `recover-plan` write reports only to stdout.
 - An output path that resolves to the input is rejected. Symlink resolution and Unix device/inode checks also protect existing aliases and hard links. The opened output identity is checked again before truncation.
 - Remediation text is advisory only and is never executed.
 - Corrupt, empty, random, truncated, unsupported, and overflow-inducing inputs produce structured diagnostics rather than parser panics.
@@ -121,6 +159,8 @@ The inspector reads at most three fixed 4096-byte header pages and streams SHA-2
 The default main-file size budget is 1 TiB. A larger input stops before hashing and header parsing with `limit_reached`; SHA-256 and unchecked fields remain unknown. Resource exhaustion is not reported as corruption.
 
 WAL inspection defaults to 1 TiB per file, 1,000,000 Entry candidates, and 256 MiB declared Payload per Entry. Payload checksum and tail reads use fixed 1 MiB chunks; memory is never allocated from an unchecked declared Entry length. WAL budget exhaustion produces `resource_limit_reached` and preserves the stop offset. If the initial file budget stops processing, SHA-256 is `null`.
+
+Verify uses bounded 16–256 KiB block buffers, at most 1,000,000 nodes per metadata chain, and at most 1,000 retained block issues. Normal blocks are counted rather than accumulated in the report. Recovery inventories at most 100,000 regular files and streams every hash. Oracle defaults to 30 seconds and 64 KiB retained output per stream. Resource/report limits preserve omitted counts or unknown coverage and are not corruption verdicts.
 
 ## Reproducible fixture generation
 
@@ -148,7 +188,7 @@ python3 scripts/generate_wal_fixtures.py
 
 This stdlib-only generator does not invoke DuckDB or the Rust parser. It writes `normal.wal`, independent per-Entry expectations, and the Issue #19099 historical corpus: one file truncated at a fixed in-Entry offset and another zero-filled from that same offset to the original EOF. The corpus makes no claim that current DuckDB still has the historical bug.
 
-Tests never require network access or DuckDB.
+Tests never require network access or DuckDB. An additional real-Oracle test runs only when `DUCKDB_V2_0_0=/path/to/duckdb` is explicitly set; mocked Oracle tests cover failure, timeout, output limits, and copy isolation without DuckDB.
 
 ## Test and lint
 
@@ -162,9 +202,11 @@ Main-file tests cover the official normal fixture, empty/non-DuckDB/random files
 
 WAL tests cover normal/empty/unsupported files, out-of-bounds and huge lengths, mid-Entry and fixed-header truncation, checksum bit flips, zero and nonzero tails, random bytes, unknown types, malformed Flush objects, Checkpoint decoding, resource limits, JSON Schema/Text/output files, and the historical same-cut truncation/zero-fill pair. Independent manifests verify offsets and lengths. Tests assert no Panic, unchanged input SHA-256, and `last_good_flush=null` whenever no continuously verified Flush exists.
 
+Verify tests cover full/default scans, isolated block damage, truncation, extra data, metadata cycles/bounds/checksum failures, legitimate shared blocks, encryption, and resource limits. Recovery and Oracle tests check all six report sections, candidate loss ranges, missing/ambiguous evidence, version mismatch, disagreement, output truncation, timeout, and read-only copy execution. End-to-end helpers compare every original evidence file's SHA-256 and the complete file set before and after execution, including an Oracle that deliberately modifies its temporary copy.
+
 ## Workspace
 
-- `crates/duckdb-format`: fixed-page reads, scalar parsing, DuckDB checksum, checked geometry, WAL v2 frame/envelope parsing, and format errors.
-- `crates/duckdb-report`: observation/finding/inference model, main-file and WAL JSON types, and text rendering.
-- `crates/duckdb-forensics`: main-file and WAL inspection pipelines, CLI, streaming SHA-256/checksums, resource limits, and safe report output.
-- `schemas/wal-report.schema.json`: WAL JSON Schema version 1.
+- `crates/duckdb-format`: fixed-page reads, scalar parsing, DuckDB checksum, checked block/metadata geometry, WAL v2 frame/envelope parsing, and format errors.
+- `crates/duckdb-report`: observation/finding/inference model, main-file, verification, recovery, Oracle, and WAL JSON types and text rendering.
+- `crates/duckdb-forensics`: read-only analysis pipelines, advisory recovery planning, isolated Oracle execution, CLI, streaming hashes/checksums, and resource limits.
+- `schemas/wal-report.schema.json`, `schemas/verify-report.schema.json`, and `schemas/recovery-plan.schema.json`: independent JSON Schema version 1 contracts.

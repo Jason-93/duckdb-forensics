@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub mod oracle;
+pub mod recovery;
+pub mod verify;
 pub mod wal;
 
 use std::fmt::Write as _;

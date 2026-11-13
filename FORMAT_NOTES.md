@@ -21,6 +21,10 @@ Primary sources:
 - [`src/include/duckdb/storage/block.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/block.hpp)
 - [`src/include/duckdb/storage/metadata/metadata_manager.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/metadata/metadata_manager.hpp)
 - [`src/storage/metadata/metadata_manager.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/metadata/metadata_manager.cpp)
+- [`src/include/duckdb/storage/metadata/metadata_reader.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/metadata/metadata_reader.hpp)
+- [`src/storage/metadata/metadata_reader.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/metadata/metadata_reader.cpp)
+- [`src/include/duckdb/storage/metadata/metadata_writer.hpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/include/duckdb/storage/metadata/metadata_writer.hpp)
+- [`src/storage/metadata/metadata_writer.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/metadata/metadata_writer.cpp)
 - [`src/storage/checkpoint_manager.cpp`](https://github.com/duckdb/duckdb/blob/v2.0.0/src/storage/checkpoint_manager.cpp)
 
 WAL-specific sources:
@@ -143,6 +147,26 @@ The Rust implementation reproduces the complete-word and remainder paths. All th
 
 Alternate block-header sizes introduce a `delta` in DuckDB's checksum functions. They are not supported by this phase; the inspector does not guess that layout.
 
+## Ordinary Block verification
+
+`SingleFileBlockManager::CheckChecksum` applies the same algorithm to ordinary unencrypted blocks. For the supported eight-byte block-header layout, the stored checksum is at the block offset and the computed range is exactly `block_alloc_size - 8` bytes after that field. `verify --blocks` walks every complete physical block sequentially with a bounded buffer. The default `verify` checks only blocks needed by selected metadata chains and marks other blocks `not_checked`.
+
+A complete block with a checksum mismatch is an isolated integrity finding; it does not prevent later independent blocks from being checked. An incomplete block has `unavailable` checksum status rather than a fabricated mismatch. A reference outside the selected header's recorded count or actual EOF is reported as out of bounds with its pointer evidence. No block is inferred to be unused merely because the current parser did not visit it, and duplicate references are not automatically corruption because DuckDB explicitly tracks multi-use blocks.
+
+For a selected valid header, recorded geometry remains `12288 + block_count * block_alloc_size`. Complete physical blocks beyond that end can be implicitly free-listed according to the source comment and are classified separately. Non-allocation-aligned residual bytes are trailing data, not a valid complete block. With `--blocks`, complete beyond-count blocks receive checksum checks without changing their allocation interpretation.
+
+## Metadata sub-block chains
+
+`MetadataManager::GetMetadataBlockSize` computes `AlignValueFloor(GetBlockSize() / 64)`, where `GetBlockSize() = block_alloc_size - 8` in the supported layout. With the default allocation size this yields 4088 bytes per metadata sub-block. The sub-block location is:
+
+`block_offset + 8 + metadata_index * metadata_block_size`
+
+The packed pointer's low 56 bits identify the physical block and its high eight bits identify the sub-block. An index at least 64 is invalid. `MetadataReader::ReadNextBlock` reads an eight-byte next pointer at the start of each sub-block. `u64::MAX` terminates the chain; otherwise the packed next pointer is followed with offset zero. An initial offset below eight is raised to eight, and one above the sub-block capacity is rejected.
+
+`verify` independently traverses the selected header's `meta_block` and `free_list` roots. It checks pointer arithmetic, recorded/physical bounds, containing-block checksum, sub-block capacity, visited/verified node counts, payload capacity, and termination position. A containing-block checksum failure stops that chain before its next pointer is trusted. Each chain has its own visited set: returning to a node in the same chain is a cycle, while sharing a node across independent chains is only an observation. A per-chain node budget leaves the remainder explicitly unknown.
+
+Chain validation establishes pointer structure only. It does not decode Catalog, free-list counts, table metadata, or business payloads and does not claim those contents are healthy.
+
 ## Active-header selection and diagnostics
 
 For intact supported files, `LoadExistingDatabase` selects the header with the greater `iteration`; if iterations are equal, it selects header 2. `WriteHeader` alternates headers and increments the iteration on checkpoint.
@@ -166,7 +190,7 @@ For a candidate with valid allocation size and count, the inspector computes:
 
 All arithmetic is checked. A shorter actual file produces `truncated_file`. Equality is a passed geometry check.
 
-The `DatabaseHeader::block_count` source comment explicitly states that blocks after `block_count` are implicitly part of the free list when the file is larger. Thus `file_size > expected_recorded_file_end` is reported as `beyond_header_block_count`, not automatically called corruption. No payload or trailing-block validation is performed.
+The `DatabaseHeader::block_count` source comment explicitly states that blocks after `block_count` are implicitly part of the free list when the file is larger. Thus `file_size > expected_recorded_file_end` is reported as `beyond_header_block_count`, not automatically called corruption. The original `inspect` command does not validate those blocks; `verify --blocks` can check their checksums while preserving the separate allocation unknown.
 
 The decoded meta-block and free-list block ids are converted to offsets only with checked arithmetic. Their targets and contents are not followed.
 
@@ -240,7 +264,7 @@ The v2.0.0 `wal_type.hpp` mapping is:
 
 `confirmed_flushes` records physical Entry and end offsets. `last_good_flush` is stricter: every frame from the version object through that Flush must be complete, checksum-valid, and have a trusted type envelope, and the Flush itself must pass the exact check. A later valid Flush cannot repair continuity after an earlier error. If no such boundary exists, `last_good_flush` is `null`; it is never fabricated from a length or type guess.
 
-The last verified Flush is **not** claimed to be the last successful commit acknowledged by the application. `unterminated_data_after_last_flush` reports bytes beyond that boundary, including complete Entries without a later Flush. It is not a recovery instruction. This phase neither proposes a safe recovery point nor performs candidate truncation.
+The last verified Flush is **not** claimed to be the last successful commit acknowledged by the application. `unterminated_data_after_last_flush` reports bytes beyond that boundary, including complete Entries without a later Flush. It is not by itself a proven safe recovery point. `recover-plan` can present this boundary as a candidate action with an explicit possible-loss interval, but never executes it.
 
 ## Checkpoint Marker
 
@@ -258,6 +282,12 @@ The WAL JSON Schema is `schemas/wal-report.schema.json`. Coverage separates byte
 
 Defaults are a 1 TiB file budget, 1,000,000 Entry candidates, and 256 MiB declared Payload per Entry. Hashing and Payload checksum reads are chunked. Reaching a budget produces `resource_limit_reached` and a stop offset, not a corruption verdict. A file rejected by the initial size budget has `sha256=null`; later fields and tail facts remain unknown.
 
+## Advisory recovery plans and official-engine Oracle
+
+`recover-plan` separates direct evidence, findings, inferences, unknowns, candidate actions, and risks. A `candidate_wal_truncation` is emitted only when a continuously verified `last_good_flush` ends before EOF and the WAL hash is available without a resource-limit stop. Its possible-loss interval is exactly `[flush.end_offset, wal_file_size)`. Complete but unflushed Entries in that interval cannot be converted into a certain transaction or row count. The action requires a copy and subsequent verification; equality with EOF, no verified boundary, or incomplete/ambiguous evidence produces no action.
+
+An official engine is invoked only through an explicit `--duckdb PATH`. The executable must report exactly `v2.0.0` in an in-memory preflight. Evidence is copied to a temporary directory and original paths are not passed to the engine. Controlled initialization disables known-extension autoinstall/autoload before a copy is attached `READ_ONLY`. Commands, bounded outputs, exit status, and timeout state are observations. Oracle behavior is compared with the limited Rust checks as `agreement`, `disagreement`, or `not_comparable`; successful opening is not a complete database-health verdict and does not erase structural findings.
+
 ## Confirmed but deliberately not implemented
 
 - Encrypted Database Header decryption, encrypted checksum validation, and encrypted blocks.
@@ -265,8 +295,8 @@ Defaults are a 1 TiB file budget, 1,000,000 Entry candidates, and 256 MiB declar
 - Big-endian scalar representation.
 - Alternate/encrypted block-header sizes and the checksum `delta` path.
 - Full Catalog deserialization.
-- Meta-block/free-list payload parsing beyond the packed-pointer geometry above.
-- Block payload checksums and content validation.
+- Meta-block/free-list payload deserialization beyond the pointer-chain checks above.
+- Semantic block content validation beyond the supported checksum coverage.
 - Row Groups, column compression, and row-level data.
 - WAL replay, transaction reconstruction, business Payload decoding, or Catalog/Row Group semantics.
 - WAL v1 framing, encrypted WAL v3 decryption, and unknown WAL versions.
