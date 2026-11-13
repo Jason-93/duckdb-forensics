@@ -1,5 +1,7 @@
 # duckdb-forensics
 
+**English** | [简体中文](README.zh-CN.md)
+
 A read-only, offline crash-site inspector for DuckDB database files. Phase 1 examines the DuckDB v2.0.0 main file, its three fixed header pages, and basic block geometry. It produces offset-backed observations, findings, and explicitly separated inferences in text or JSON.
 
 The parser is implemented in Rust without `duckdb-rs`, DuckDB C++, or `unsafe` code. It never opens the evidence through DuckDB.
