@@ -29,6 +29,8 @@ pub enum Confidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputInfo {
     pub path: Option<String>,
+    #[serde(default)]
+    pub path_encoding: Option<String>,
     pub file_size: u64,
     pub sha256: Option<String>,
 }
@@ -101,9 +103,57 @@ impl Location {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingCategory {
+    Corruption,
+    Unsupported,
+    Limit,
+    #[default]
+    Unknown,
+    Informational,
+}
+
+impl FindingCategory {
+    pub fn for_code(code: &str) -> Self {
+        match code {
+            "unsupported_storage_version"
+            | "unsupported_encryption"
+            | "unsupported_vector_size"
+            | "unsupported_wal_version" => Self::Unsupported,
+            "limit_reached" | "resource_limit_reached" | "report_limit_reached" => Self::Limit,
+            "empty_wal" | "beyond_header_block_count" | "zero_filled_tail" => Self::Informational,
+            "trailing_data"
+            | "unparsed_trailing_data"
+            | "evidence_incomplete"
+            | "evidence_changed_during_analysis"
+            | "oracle_disagreement" => Self::Unknown,
+            "invalid_magic"
+            | "checksum_mismatch"
+            | "truncated_file"
+            | "invalid_block_alloc_size"
+            | "invalid_block_count"
+            | "invalid_metadata_pointer"
+            | "invalid_block_reference"
+            | "geometry_overflow"
+            | "no_valid_database_header"
+            | "invalid_wal_header"
+            | "invalid_entry_length"
+            | "entry_exceeds_remaining_file"
+            | "truncated_entry"
+            | "truncated_block"
+            | "block_out_of_bounds"
+            | "meta_block_cycle" => Self::Corruption,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     pub code: String,
+    #[serde(default)]
+    pub category: FindingCategory,
     pub severity: Severity,
     pub message: String,
     pub location: Location,
@@ -400,9 +450,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unclassified_findings_default_to_unknown_not_corruption() {
+        assert_eq!(
+            FindingCategory::for_code("future_unclassified"),
+            FindingCategory::Unknown
+        );
+    }
+
+    #[test]
     fn report_round_trip_preserves_diagnostic_categories() {
         let mut report = InspectionReport::new(InputInfo {
             path: None,
+            path_encoding: None,
             file_size: 42,
             sha256: Some("ab".repeat(32)),
         });
@@ -414,6 +473,7 @@ mod tests {
         ));
         report.findings.push(Finding {
             code: "example".to_owned(),
+            category: FindingCategory::Unknown,
             severity: Severity::Warning,
             message: "example finding".to_owned(),
             location: Location::new(Some(8), "main_header"),

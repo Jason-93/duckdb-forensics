@@ -223,6 +223,24 @@ fn recover_plan_oracle_preserves_every_original_evidence_hash() {
 }
 
 #[test]
+fn oracle_invalid_utf8_is_preserved_as_hex() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = directory.path().join("evidence.duckdb");
+    fs::write(&database, NORMAL_DB).expect("database");
+    let (oracle, _) = mock_oracle(
+        &directory,
+        "v2.0.0",
+        "printf '\\377'\nprintf '1\\n'\nexit 0",
+    );
+    let report = run_verify(&database, &oracle);
+    let oracle = report.oracle.expect("Oracle report");
+    let run = &oracle.runs[1];
+    assert!(!run.stdout_utf8_valid);
+    assert_eq!(run.stdout_hex.as_deref(), Some("ff310a"));
+    assert!(run.stdout.is_empty());
+}
+
+#[test]
 fn explicitly_provided_real_duckdb_v2_is_supported() {
     let Some(executable) = std::env::var_os("DUCKDB_V2_0_0") else {
         return;

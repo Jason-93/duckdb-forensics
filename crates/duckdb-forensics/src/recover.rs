@@ -15,17 +15,22 @@ use duckdb_report::{Confidence, Evidence, Finding, Location, Severity, Unknown};
 use sha2::{Digest, Sha256};
 
 use crate::oracle::{OracleError, run_oracle};
+use crate::util::path_text;
 use crate::verify::{VerifyError, VerifyLimits, verify_path_with_limits};
 use crate::wal::{WalInspectError, WalInspectionLimits, inspect_wal_path_with_limits};
 
 const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_EVIDENCE_FILES: usize = 100_000;
+const DEFAULT_MAX_EVIDENCE_DEPTH: usize = 64;
+const DEFAULT_MAX_EVIDENCE_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveryLimits {
     pub verify: VerifyLimits,
     pub wal: WalInspectionLimits,
     pub max_evidence_files: usize,
+    pub max_evidence_depth: usize,
+    pub max_evidence_bytes: u64,
 }
 
 impl Default for RecoveryLimits {
@@ -34,15 +39,23 @@ impl Default for RecoveryLimits {
             verify: VerifyLimits::default(),
             wal: WalInspectionLimits::default(),
             max_evidence_files: DEFAULT_MAX_EVIDENCE_FILES,
+            max_evidence_depth: DEFAULT_MAX_EVIDENCE_DEPTH,
+            max_evidence_bytes: DEFAULT_MAX_EVIDENCE_BYTES,
         }
     }
+}
+
+struct Inventory {
+    files: Vec<EvidenceFileReport>,
+    complete: bool,
+    limit: Option<(&'static str, u64)>,
 }
 
 #[derive(Debug)]
 pub enum RecoverError {
     Canonicalize { path: PathBuf, source: io::Error },
     Inventory { path: PathBuf, source: io::Error },
-    TooManyFiles { limit: usize },
+    InventoryLimit { resource: &'static str, limit: u64 },
     Verify(VerifyError),
     Wal(WalInspectError),
     Oracle(OracleError),
@@ -61,9 +74,9 @@ impl Display for RecoverError {
                 "cannot inventory or hash evidence file {}: {source}",
                 path.display()
             ),
-            Self::TooManyFiles { limit } => write!(
+            Self::InventoryLimit { resource, limit } => write!(
                 formatter,
-                "evidence directory exceeds the {limit} regular-file inventory limit"
+                "evidence inventory exceeds the {resource} limit of {limit}"
             ),
             Self::Verify(error) => Display::fmt(error, formatter),
             Self::Wal(error) => Display::fmt(error, formatter),
@@ -76,7 +89,7 @@ impl Error for RecoverError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Canonicalize { source, .. } | Self::Inventory { source, .. } => Some(source),
-            Self::TooManyFiles { .. } => None,
+            Self::InventoryLimit { .. } => None,
             Self::Verify(error) => Some(error),
             Self::Wal(error) => Some(error),
             Self::Oracle(error) => Some(error),
@@ -124,16 +137,21 @@ pub fn recover_plan_with_options(
             path: path.to_path_buf(),
             source,
         })?;
-    let before = inventory(&canonical, limits.max_evidence_files)?;
-    let databases = top_level_databases(&canonical)?;
+    let before = inventory(
+        &canonical,
+        limits.max_evidence_files,
+        limits.max_evidence_depth,
+        limits.max_evidence_bytes,
+    )?;
     let mut report = RecoveryPlanReport {
         schema_version: "1".to_owned(),
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         status: RecoveryPlanStatus::Complete,
         evidence_dir: canonical.display().to_string(),
         observed_facts: ObservedFacts {
-            files: before.clone(),
-            evidence_unchanged: true,
+            files: before.files.clone(),
+            inventory_complete: before.complete,
+            evidence_unchanged: before.complete,
             database: None,
             wal: None,
             oracle: None,
@@ -148,6 +166,23 @@ pub fn recover_plan_with_options(
         }],
     };
 
+    if !before.complete {
+        report.status = RecoveryPlanStatus::Incomplete;
+        report.observed_facts.evidence_unchanged = false;
+        if let Some((resource, limit)) = before.limit {
+            report
+                .findings
+                .push(recovery_limit_finding(resource, limit));
+        }
+        report.unknowns.push(Unknown {
+            code: "evidence_inventory_limit".to_owned(),
+            structure_path: "evidence_dir".to_owned(),
+            reason: "The evidence inventory is partial; analysis and candidate actions were not attempted.".to_owned(),
+        });
+        return Ok(report);
+    }
+
+    let databases = top_level_databases(&canonical, limits.max_evidence_files)?;
     if databases.len() != 1 {
         report.status = RecoveryPlanStatus::Incomplete;
         report.unknowns.push(Unknown {
@@ -230,10 +265,23 @@ pub fn recover_plan_with_options(
         }
     }
 
-    let after = inventory(&canonical, limits.max_evidence_files)?;
-    report.observed_facts.evidence_unchanged = before == after;
+    let after = inventory(
+        &canonical,
+        limits.max_evidence_files,
+        limits.max_evidence_depth,
+        limits.max_evidence_bytes,
+    )?;
+    report.observed_facts.inventory_complete = after.complete;
+    report.observed_facts.evidence_unchanged = after.complete && before.files == after.files;
+    if let Some((resource, limit)) = after.limit {
+        report
+            .findings
+            .push(recovery_limit_finding(resource, limit));
+        report.candidate_actions.clear();
+    }
     if !report.observed_facts.evidence_unchanged {
         report.status = RecoveryPlanStatus::Incomplete;
+        report.candidate_actions.clear();
         report.findings.push(recovery_finding(
             "evidence_changed_during_analysis",
             "The original evidence file set or hashes changed during analysis; external modification cannot be ruled out.",
@@ -309,9 +357,26 @@ fn append_wal(report: &mut RecoveryPlanReport, wal: &WalReport) {
     }
 }
 
+fn recovery_limit_finding(resource: &str, limit: u64) -> Finding {
+    Finding {
+        code: "resource_limit_reached".to_owned(),
+        category: duckdb_report::FindingCategory::Limit,
+        severity: Severity::Warning,
+        message: "The evidence inventory resource limit was reached; the inventory and recovery analysis are incomplete.".to_owned(),
+        location: Location::new(None, "evidence_dir"),
+        evidence: vec![
+            Evidence::new("resource", resource),
+            Evidence::new("limit", limit),
+        ],
+        remediation_hint: "Preserve the evidence and retry with an explicitly affordable budget; this is not a corruption verdict.".to_owned(),
+        confidence: Confidence::High,
+    }
+}
+
 fn recovery_finding(code: &str, message: &str, evidence: Vec<Evidence>) -> Finding {
     Finding {
         code: code.to_owned(),
+        category: duckdb_report::FindingCategory::for_code(code),
         severity: Severity::Warning,
         message: message.to_owned(),
         location: Location::new(None, "evidence_dir"),
@@ -323,8 +388,8 @@ fn recovery_finding(code: &str, message: &str, evidence: Vec<Evidence>) -> Findi
     }
 }
 
-fn top_level_databases(directory: &Path) -> Result<Vec<PathBuf>, RecoverError> {
-    let entries = sorted_entries(directory)?;
+fn top_level_databases(directory: &Path, max_entries: usize) -> Result<Vec<PathBuf>, RecoverError> {
+    let entries = sorted_entries(directory, max_entries)?;
     Ok(entries
         .into_iter()
         .filter_map(|entry| {
@@ -349,74 +414,170 @@ fn is_regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-fn inventory(directory: &Path, max_files: usize) -> Result<Vec<EvidenceFileReport>, RecoverError> {
+fn inventory(
+    directory: &Path,
+    max_files: usize,
+    max_depth: usize,
+    max_bytes: u64,
+) -> Result<Inventory, RecoverError> {
     let mut paths = Vec::new();
-    collect_regular_files(directory, &mut paths)?;
-    if paths.len() > max_files {
-        return Err(RecoverError::TooManyFiles { limit: max_files });
+    match collect_regular_files(directory, &mut paths, max_files, max_depth) {
+        Ok(()) => {}
+        Err(RecoverError::InventoryLimit { resource, limit }) => {
+            return Ok(Inventory {
+                files: Vec::new(),
+                complete: false,
+                limit: Some((resource, limit)),
+            });
+        }
+        Err(error) => return Err(error),
     }
     paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            let relative = path.strip_prefix(directory).unwrap_or(&path);
-            let metadata = fs::metadata(&path).map_err(|source| RecoverError::Inventory {
-                path: path.clone(),
-                source,
-            })?;
-            Ok(EvidenceFileReport {
-                path: relative.to_string_lossy().replace('\\', "/"),
-                file_size: metadata.len(),
-                sha256: stream_sha256(&path)?,
-            })
-        })
-        .collect()
+    let mut files = Vec::with_capacity(paths.len());
+    let mut total_bytes = 0_u64;
+    for path in paths {
+        let metadata = fs::metadata(&path).map_err(|source| RecoverError::Inventory {
+            path: path.clone(),
+            source,
+        })?;
+        let Some(next_total) = total_bytes.checked_add(metadata.len()) else {
+            return Ok(Inventory {
+                files,
+                complete: false,
+                limit: Some(("evidence_bytes", max_bytes)),
+            });
+        };
+        if next_total > max_bytes {
+            return Ok(Inventory {
+                files,
+                complete: false,
+                limit: Some(("evidence_bytes", max_bytes)),
+            });
+        }
+        let relative = path.strip_prefix(directory).unwrap_or(&path);
+        let (path_text, encoding) = path_text(relative);
+        let normalized_path = if std::path::MAIN_SEPARATOR == '\\' {
+            path_text.replace('\\', "/")
+        } else {
+            path_text
+        };
+        let sha256 = match stream_sha256(&path, max_bytes - total_bytes) {
+            Ok(hash) => hash,
+            Err(RecoverError::InventoryLimit { resource, limit }) => {
+                return Ok(Inventory {
+                    files,
+                    complete: false,
+                    limit: Some((resource, limit)),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        files.push(EvidenceFileReport {
+            path: normalized_path,
+            path_encoding: encoding.to_owned(),
+            file_size: metadata.len(),
+            sha256,
+        });
+        total_bytes = next_total;
+    }
+    Ok(Inventory {
+        files,
+        complete: true,
+        limit: None,
+    })
 }
 
-fn collect_regular_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), RecoverError> {
-    for entry in sorted_entries(directory)? {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| RecoverError::Inventory {
-                path: path.clone(),
-                source,
-            })?;
-        if file_type.is_dir() {
-            collect_regular_files(&path, output)?;
-        } else if file_type.is_file() {
-            output.push(path);
+fn collect_regular_files(
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+    max_entries: usize,
+    max_depth: usize,
+) -> Result<(), RecoverError> {
+    let mut pending = vec![(directory.to_path_buf(), 0_usize)];
+    let mut seen_entries = 0_usize;
+    while let Some((directory, depth)) = pending.pop() {
+        let entries = sorted_entries(&directory, max_entries.saturating_sub(seen_entries))?;
+        seen_entries =
+            seen_entries
+                .checked_add(entries.len())
+                .ok_or(RecoverError::InventoryLimit {
+                    resource: "directory_entries",
+                    limit: max_entries as u64,
+                })?;
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|source| RecoverError::Inventory {
+                    path: path.clone(),
+                    source,
+                })?;
+            if file_type.is_dir() {
+                if depth >= max_depth {
+                    return Err(RecoverError::InventoryLimit {
+                        resource: "directory_depth",
+                        limit: max_depth as u64,
+                    });
+                }
+                pending.push((path, depth + 1));
+            } else if file_type.is_file() {
+                output.push(path);
+            }
         }
     }
     Ok(())
 }
 
-fn sorted_entries(directory: &Path) -> Result<Vec<fs::DirEntry>, RecoverError> {
-    let mut entries = fs::read_dir(directory)
-        .map_err(|source| RecoverError::Inventory {
+fn sorted_entries(directory: &Path, max_entries: usize) -> Result<Vec<fs::DirEntry>, RecoverError> {
+    let reader = fs::read_dir(directory).map_err(|source| RecoverError::Inventory {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    let mut entries = Vec::new();
+    for entry in reader {
+        if entries.len() >= max_entries {
+            return Err(RecoverError::InventoryLimit {
+                resource: "directory_entries",
+                limit: max_entries as u64,
+            });
+        }
+        entries.push(entry.map_err(|source| RecoverError::Inventory {
             path: directory.to_path_buf(),
             source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| RecoverError::Inventory {
-            path: directory.to_path_buf(),
-            source,
-        })?;
+        })?);
+    }
     entries.sort_by_key(|entry| entry.path());
     Ok(entries)
 }
 
-fn stream_sha256(path: &Path) -> Result<String, RecoverError> {
+fn stream_sha256(path: &Path, max_bytes: u64) -> Result<String, RecoverError> {
     let mut file = File::open(path).map_err(|source| RecoverError::Inventory {
         path: path.to_path_buf(),
         source,
     })?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_SIZE];
+    let mut hashed = 0_u64;
     loop {
-        match file.read(&mut buffer) {
+        let remaining = max_bytes.saturating_sub(hashed);
+        let wanted = remaining.min(buffer.len() as u64) as usize;
+        let result = if wanted == 0 {
+            file.read(&mut buffer[..1])
+        } else {
+            file.read(&mut buffer[..wanted])
+        };
+        match result {
             Ok(0) => break,
-            Ok(count) => hasher.update(&buffer[..count]),
+            Ok(count) if hashed.saturating_add(count as u64) <= max_bytes => {
+                hasher.update(&buffer[..count]);
+                hashed += count as u64;
+            }
+            Ok(_) => {
+                return Err(RecoverError::InventoryLimit {
+                    resource: "evidence_bytes",
+                    limit: max_bytes,
+                });
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(source) => {
                 return Err(RecoverError::Inventory {

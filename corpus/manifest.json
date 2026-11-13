@@ -1,0 +1,375 @@
+{
+  "cases": [
+    {
+      "base": "main",
+      "command": "inspect",
+      "expected": {
+        "categories": {
+          "truncated_file": "corruption"
+        },
+        "codes": [
+          "truncated_file"
+        ]
+      },
+      "name": "empty-main",
+      "operations": [
+        {
+          "length": 0,
+          "op": "truncate"
+        }
+      ],
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "base": "main",
+      "command": "inspect",
+      "expected": {
+        "categories": {
+          "truncated_file": "corruption"
+        },
+        "codes": [
+          "truncated_file"
+        ]
+      },
+      "name": "short-main-header",
+      "operations": [
+        {
+          "length": 11,
+          "op": "truncate"
+        }
+      ],
+      "sha256": "1c2a34eb1eabc145c3021021d52407d7f56cdc354628859536e14230150c4f45"
+    },
+    {
+      "base": "main",
+      "command": "inspect",
+      "expected": {
+        "codes": [],
+        "observations": {
+          "library_git_desc": null,
+          "library_git_desc_utf8_valid": false
+        }
+      },
+      "name": "invalid-utf8-main",
+      "operations": [
+        {
+          "offset": 52,
+          "op": "write_u8",
+          "value": 255
+        },
+        {
+          "op": "repair",
+          "region": "main"
+        }
+      ],
+      "sha256": "66a76af2e87ef0113298bca6e1e5e898c26ad442e8a3b4c6cdd891676b21daa5"
+    },
+    {
+      "base": "main",
+      "command": "inspect",
+      "expected": {
+        "categories": {
+          "invalid_block_count": "corruption"
+        },
+        "codes": [
+          "invalid_block_count"
+        ]
+      },
+      "name": "invalid-block-count",
+      "operations": [
+        {
+          "offset": 4128,
+          "op": "write_u64",
+          "value": 18446744073709551615
+        },
+        {
+          "op": "repair",
+          "region": "database0"
+        }
+      ],
+      "sha256": "051931616321e4a2518a94778b57cc045e8f2c470c3e8d9eecb349e712d7342c"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "meta_block_cycle": "corruption"
+        },
+        "codes": [
+          "meta_block_cycle"
+        ]
+      },
+      "name": "meta-self-cycle",
+      "operations": [
+        {
+          "offset": 12296,
+          "op": "write_u64",
+          "value": 0
+        },
+        {
+          "op": "repair",
+          "region": "block0"
+        }
+      ],
+      "sha256": "8231e87f8b3b2ce4a2e24ae1c07c427ebf6df51cafaf2d96d7c22cf3afa3a067"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "meta_block_cycle": "corruption"
+        },
+        "codes": [
+          "meta_block_cycle"
+        ]
+      },
+      "name": "meta-multi-node-cycle",
+      "operations": [
+        {
+          "offset": 12296,
+          "op": "write_u64",
+          "value": 72057594037927936
+        },
+        {
+          "offset": 16384,
+          "op": "write_u64",
+          "value": 0
+        },
+        {
+          "op": "repair",
+          "region": "block0"
+        }
+      ],
+      "sha256": "2636322f56e6ad1e3eedaa1cae55e41d28b59c5e5dfb45faee7eb40dd8595ce1"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "block_out_of_bounds": "corruption"
+        },
+        "codes": [
+          "block_out_of_bounds"
+        ]
+      },
+      "name": "meta-out-of-bounds",
+      "operations": [
+        {
+          "offset": 4112,
+          "op": "write_u64",
+          "value": 99
+        },
+        {
+          "op": "repair",
+          "region": "database0"
+        }
+      ],
+      "sha256": "42869bdfc3be75530caf3f5fd4f9919e40229474f4e8863f06b8a1df5e35a77f"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "unsupported_storage_version": "unsupported"
+        },
+        "codes": [
+          "unsupported_storage_version"
+        ],
+        "status": "unsupported"
+      },
+      "name": "unsupported-main-version",
+      "operations": [
+        {
+          "offset": 12,
+          "op": "write_u64",
+          "value": 64
+        },
+        {
+          "op": "repair",
+          "region": "main"
+        }
+      ],
+      "sha256": "d230f2dfac893c2faf91f966027c1c92f24862e643cb79fc71d830f9a68ac084"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "unsupported_encryption": "unsupported"
+        },
+        "codes": [
+          "unsupported_encryption"
+        ],
+        "status": "unsupported"
+      },
+      "name": "encrypted-main",
+      "operations": [
+        {
+          "offset": 20,
+          "op": "write_u64",
+          "value": 1
+        },
+        {
+          "op": "repair",
+          "region": "main"
+        }
+      ],
+      "sha256": "0eb6718bfbe23a03a41939933ebadcfc4798bbea7ab9f2cc85042b5a5a97e299"
+    },
+    {
+      "command": "wal",
+      "expected": {
+        "categories": {
+          "invalid_wal_header": "corruption"
+        },
+        "codes": [
+          "invalid_wal_header"
+        ]
+      },
+      "name": "random-wal",
+      "random_seed": 1311768467463790320,
+      "random_size": 64,
+      "sha256": "d0190645e184cb770fc860ff146ac26a240b086991bdfddc8e6666151b989a2c"
+    },
+    {
+      "base": "wal",
+      "command": "wal",
+      "expected": {
+        "categories": {
+          "invalid_entry_length": "corruption"
+        },
+        "codes": [
+          "invalid_entry_length"
+        ]
+      },
+      "name": "zero-length-wal",
+      "operations": [
+        {
+          "offset": 30,
+          "op": "write_u64",
+          "value": 0
+        }
+      ],
+      "sha256": "e87a6c19f151024e9c1386e3a35e261641b1e62b8f1e9d50b7297e17f060bd10"
+    },
+    {
+      "base": "wal",
+      "command": "wal",
+      "expected": {
+        "categories": {
+          "invalid_entry_length": "corruption"
+        },
+        "codes": [
+          "invalid_entry_length"
+        ]
+      },
+      "name": "max-length-wal",
+      "operations": [
+        {
+          "offset": 30,
+          "op": "write_u64",
+          "value": 18446744073709551615
+        }
+      ],
+      "sha256": "da366a19881d1d47884212c6c7e393873b1f7bf31fcbc7e80d17fde4f7fb4eea"
+    },
+    {
+      "base": "wal",
+      "command": "wal",
+      "expected": {
+        "categories": {
+          "entry_exceeds_remaining_file": "corruption",
+          "truncated_entry": "corruption"
+        },
+        "codes": [
+          "entry_exceeds_remaining_file",
+          "truncated_entry"
+        ],
+        "first_unparsed_offset": 51
+      },
+      "name": "truncated-frame-wal",
+      "operations": [
+        {
+          "length": 70,
+          "op": "truncate"
+        }
+      ],
+      "sha256": "254c9bf3722250e6383f66c0f3c89f964fdc12ab8b6b3aa8ad8c309c84e5ade7"
+    },
+    {
+      "base": "wal",
+      "command": "wal",
+      "expected": {
+        "entries_omitted": 3,
+        "reported_entries": 2,
+        "total_entries": 5
+      },
+      "limits": {
+        "max_report_entries": 2
+      },
+      "name": "wal-report-retention",
+      "operations": [
+        {
+          "end": 51,
+          "op": "append_slice",
+          "start": 30
+        },
+        {
+          "end": 51,
+          "op": "append_slice",
+          "start": 30
+        }
+      ],
+      "sha256": "0190bc0d45ce88296ba2b1d2eca172e439e82fefc164ccbc156516661768db1b"
+    },
+    {
+      "base": "main",
+      "command": "verify",
+      "expected": {
+        "categories": {
+          "resource_limit_reached": "limit"
+        },
+        "codes": [
+          "resource_limit_reached"
+        ],
+        "status": "resource_limit_reached"
+      },
+      "limits": {
+        "max_meta_nodes": 0
+      },
+      "name": "meta-node-limit",
+      "operations": [],
+      "sha256": "bc8454a03157e2a9e43c2b253e7bde10244107f40f42121faddc7a715171292b"
+    },
+    {
+      "command": "inspect",
+      "expected": {
+        "categories": {
+          "limit_reached": "limit"
+        },
+        "codes": [
+          "limit_reached"
+        ]
+      },
+      "name": "huge-sparse-main",
+      "sparse_size": 2199023255552
+    }
+  ],
+  "generator": "scripts/generate_fault_corpus.py",
+  "schema_version": 1,
+  "sources": {
+    "main": {
+      "path": "crates/duckdb-forensics/tests/fixtures/normal.duckdb",
+      "sha256": "bc8454a03157e2a9e43c2b253e7bde10244107f40f42121faddc7a715171292b"
+    },
+    "wal": {
+      "path": "crates/duckdb-forensics/tests/fixtures/normal.wal",
+      "sha256": "44a1b2d4ce11627d469e283d003f78b25f4648c8cd6c8872facd3326fc60468f"
+    }
+  }
+}

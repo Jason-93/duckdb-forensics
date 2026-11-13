@@ -17,6 +17,8 @@ use duckdb_report::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::util::{open_regular_file, path_text};
+
 const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
 
@@ -105,21 +107,21 @@ pub fn inspect_path_with_limits(
             path: path.to_path_buf(),
             source,
         })?;
-    let mut file = File::open(&canonical_path).map_err(|source| InspectError::Open {
-        path: canonical_path.clone(),
-        source,
-    })?;
-    let metadata = file.metadata().map_err(|source| InspectError::Metadata {
-        path: canonical_path.clone(),
-        source,
-    })?;
+    let (mut file, metadata) =
+        open_regular_file(&canonical_path).map_err(|source| InspectError::Open {
+            path: canonical_path.clone(),
+            source,
+        })?;
     let file_size = metadata.len();
+    let (path, path_encoding) = if hide_path {
+        (None, None)
+    } else {
+        let (path, encoding) = path_text(&canonical_path);
+        (Some(path), Some(encoding.to_owned()))
+    };
     let input = InputInfo {
-        path: if hide_path {
-            None
-        } else {
-            Some(canonical_path.display().to_string())
-        },
+        path,
+        path_encoding,
         file_size,
         sha256: None,
     };
@@ -930,10 +932,34 @@ fn observe_main_header(report: &mut InspectionReport, header: &MainHeader) {
             fixed_text(&header.library_git_desc),
         ),
         Observation::new(
+            "library_git_desc_hex",
+            "main_header",
+            Some(52),
+            hex(&header.library_git_desc),
+        ),
+        Observation::new(
+            "library_git_desc_utf8_valid",
+            "main_header",
+            Some(52),
+            fixed_text(&header.library_git_desc).is_some(),
+        ),
+        Observation::new(
             "library_git_hash",
             "main_header",
             Some(84),
             fixed_text(&header.library_git_hash),
+        ),
+        Observation::new(
+            "library_git_hash_hex",
+            "main_header",
+            Some(84),
+            hex(&header.library_git_hash),
+        ),
+        Observation::new(
+            "library_git_hash_utf8_valid",
+            "main_header",
+            Some(84),
+            fixed_text(&header.library_git_hash).is_some(),
         ),
         Observation::new(
             "encryption_metadata_hex",
@@ -1135,6 +1161,7 @@ fn finding(
 ) -> Finding {
     Finding {
         code: code.to_owned(),
+        category: duckdb_report::FindingCategory::for_code(code),
         severity,
         message: message.into(),
         location,
@@ -1161,12 +1188,12 @@ fn stream_sha256(file: &mut File) -> Result<String, InspectError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn fixed_text(bytes: &[u8]) -> String {
+fn fixed_text(bytes: &[u8]) -> Option<String> {
     let end = bytes
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    std::str::from_utf8(&bytes[..end]).ok().map(str::to_owned)
 }
 
 fn hex(bytes: &[u8]) -> String {

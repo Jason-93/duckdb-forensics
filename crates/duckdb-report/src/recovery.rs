@@ -7,6 +7,14 @@ use crate::verify::VerifyReport;
 use crate::wal::WalReport;
 use crate::{Evidence, Finding, Inference, Unknown};
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_encoding() -> String {
+    "unspecified".to_owned()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryPlanStatus {
@@ -17,6 +25,8 @@ pub enum RecoveryPlanStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceFileReport {
     pub path: String,
+    #[serde(default = "default_encoding")]
+    pub path_encoding: String,
     pub file_size: u64,
     pub sha256: String,
 }
@@ -24,6 +34,8 @@ pub struct EvidenceFileReport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservedFacts {
     pub files: Vec<EvidenceFileReport>,
+    #[serde(default = "default_true")]
+    pub inventory_complete: bool,
     pub evidence_unchanged: bool,
     pub database: Option<VerifyReport>,
     pub wal: Option<WalReport>,

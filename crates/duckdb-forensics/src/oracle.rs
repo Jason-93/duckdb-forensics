@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use duckdb_report::oracle::{OracleComparison, OracleReport, OracleRunReport};
 use duckdb_report::verify::{VerifyReport, VerifyStatus};
+
+use crate::util::{decode_text, path_text};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -119,8 +121,10 @@ pub fn run_oracle_with_limits(
     let init = workspace.path().join("oracle-init.sql");
     fs::write(&init, INIT_SQL).map_err(OracleError::Temporary)?;
 
+    let (executable_text, executable_encoding) = path_text(&executable);
     let mut report = OracleReport {
-        executable: executable.display().to_string(),
+        executable: executable_text,
+        executable_encoding: executable_encoding.to_owned(),
         version: None,
         runs: Vec::new(),
         comparison: OracleComparison::NotComparable,
@@ -153,11 +157,7 @@ pub fn run_oracle_with_limits(
         return Ok(report);
     }
 
-    let database_name = database.file_name().ok_or_else(|| OracleError::Copy {
-        path: database.clone(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "database has no file name"),
-    })?;
-    let copied_database = copies.join(database_name);
+    let copied_database = copies.join("evidence.duckdb");
     fs::copy(&database, &copied_database).map_err(|source| OracleError::Copy {
         path: database.clone(),
         source,
@@ -170,11 +170,7 @@ pub fn run_oracle_with_limits(
                 path: wal.to_path_buf(),
                 source,
             })?;
-        let wal_name = wal.file_name().ok_or_else(|| OracleError::Copy {
-            path: wal.clone(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "WAL has no file name"),
-        })?;
-        let destination = copies.join(wal_name);
+        let destination = copies.join("evidence.duckdb.wal");
         fs::copy(&wal, &destination).map_err(|source| OracleError::Copy {
             path: wal.clone(),
             source,
@@ -266,12 +262,14 @@ fn execute(
     home: &Path,
     limits: OracleLimits,
 ) -> OracleRunReport {
-    let mut argv = vec![executable.display().to_string()];
+    let mut argv = vec![path_text(executable).0];
     argv.extend(args.iter().cloned());
+    let (working_directory_text, working_directory_encoding) = path_text(working_directory);
     let mut report = OracleRunReport {
         purpose: purpose.to_owned(),
         argv,
-        working_directory: working_directory.display().to_string(),
+        working_directory: working_directory_text,
+        working_directory_encoding: working_directory_encoding.to_owned(),
         timeout_ms: limits.timeout.as_millis().min(u64::MAX as u128) as u64,
         output_limit_bytes: limits.output_limit_bytes,
         exit_code: None,
@@ -279,6 +277,10 @@ fn execute(
         killed: false,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_utf8_valid: true,
+        stderr_utf8_valid: true,
+        stdout_hex: None,
+        stderr_hex: None,
         stdout_truncated: false,
         stderr_truncated: false,
         error: None,
@@ -405,12 +407,16 @@ fn snapshot_capture(
     report: &mut OracleRunReport,
 ) {
     if let Ok(capture) = capture.lock() {
-        let contents = String::from_utf8_lossy(&capture.retained).into_owned();
+        let (contents, utf8_valid, raw_hex) = decode_text(&capture.retained);
         if stream == "stdout" {
             report.stdout = contents;
+            report.stdout_utf8_valid = utf8_valid;
+            report.stdout_hex = raw_hex;
             report.stdout_truncated = capture.truncated;
         } else {
             report.stderr = contents;
+            report.stderr_utf8_valid = utf8_valid;
+            report.stderr_hex = raw_hex;
             report.stderr_truncated = capture.truncated;
         }
     } else {

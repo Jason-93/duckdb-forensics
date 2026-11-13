@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: python3 scripts/generate_fault_corpus.py --output "$RUNNER_TEMP/fault-corpus-a"
+      - run: python3 scripts/generate_fault_corpus.py --output "$RUNNER_TEMP/fault-corpus-b"
+      - run: diff -ru "$RUNNER_TEMP/fault-corpus-a" "$RUNNER_TEMP/fault-corpus-b"
+      - run: python3 scripts/generate_wal_fixtures.py
+      - run: git diff --exit-code
+      - run: cargo build --workspace --locked
+
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --locked

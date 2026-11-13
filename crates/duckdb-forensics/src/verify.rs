@@ -162,11 +162,21 @@ pub fn verify_path_with_limits(
                 && observation.name == "encrypted"
                 && observation.value.as_bool() == Some(true)
         });
-        report.status = if encrypted {
+        let unsupported = report
+            .findings
+            .iter()
+            .any(|finding| finding.category == duckdb_report::FindingCategory::Unsupported);
+        report.status = if unsupported {
             VerifyStatus::Unsupported
         } else {
             VerifyStatus::Incomplete
         };
+        if unsupported {
+            report
+                .coverage
+                .unsupported
+                .push("unsupported main/database headers and dependent block checks".to_owned());
+        }
         if encrypted {
             report.coverage.unsupported.extend([
                 "encrypted database headers".to_owned(),
@@ -385,7 +395,18 @@ fn scan_all_blocks(
         })?;
         read_exact_at(file, offset, &mut buffer)?;
         report.blocks.physical_blocks_scanned += 1;
-        verify_block_checksum(report, block_id, offset, &buffer, true, true, max_issues);
+        verify_block_checksum(
+            report,
+            block_id,
+            offset,
+            &buffer,
+            BlockChecksumOptions {
+                expected_length: alloc as usize,
+                count_result: true,
+                record_issue: true,
+                max_issues,
+            },
+        )?;
     }
     report.coverage.integrity_checked_bytes = report
         .coverage
@@ -410,27 +431,46 @@ fn scan_all_blocks(
     Ok(())
 }
 
+struct BlockChecksumOptions {
+    expected_length: usize,
+    count_result: bool,
+    record_issue: bool,
+    max_issues: usize,
+}
+
 fn verify_block_checksum(
     report: &mut VerifyReport,
     block_id: u64,
     offset: u64,
     bytes: &[u8],
-    count_result: bool,
-    record_issue: bool,
-    max_issues: usize,
-) -> bool {
-    let stored = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]));
+    options: BlockChecksumOptions,
+) -> Result<bool, VerifyError> {
+    if bytes.len() != options.expected_length || bytes.len() < DEFAULT_BLOCK_HEADER_SIZE {
+        return Err(VerifyError::Io {
+            operation: "verify block checksum",
+            offset,
+            source: io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "block length differs from the configured complete block length",
+            ),
+        });
+    }
+    let stored = u64::from_le_bytes(bytes[..8].try_into().map_err(|_| VerifyError::Io {
+        operation: "read block checksum",
+        offset,
+        source: io::Error::new(io::ErrorKind::InvalidData, "invalid checksum field length"),
+    })?);
     let computed = duckdb_checksum(&bytes[8..]);
     if stored == computed {
-        if count_result {
+        if options.count_result {
             report.blocks.valid_checksums += 1;
         }
-        return true;
+        return Ok(true);
     }
-    if count_result {
+    if options.count_result {
         report.blocks.checksum_mismatches += 1;
     }
-    if record_issue {
+    if options.record_issue {
         push_block_issue(
             report,
             BlockIssue {
@@ -446,10 +486,10 @@ fn verify_block_checksum(
             "checksum_mismatch",
             Severity::Error,
             "A complete block's stored checksum differs from its computed checksum; other blocks remain independently checkable.",
-            max_issues,
+            options.max_issues,
         );
     }
-    false
+    Ok(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -633,10 +673,13 @@ fn verify_meta_chain(
                 block_id,
                 block_offset,
                 &buffer,
-                !report.blocks.full_scan_requested,
-                !report.blocks.full_scan_requested,
-                limits.max_block_issues,
-            );
+                BlockChecksumOptions {
+                    expected_length: alloc as usize,
+                    count_result: !report.blocks.full_scan_requested,
+                    record_issue: !report.blocks.full_scan_requested,
+                    max_issues: limits.max_block_issues,
+                },
+            )?;
             report.blocks.metadata_blocks_checked += 1;
             checksum_cache.insert(block_id, valid);
             valid
@@ -729,6 +772,7 @@ fn finding(
 ) -> Finding {
     Finding {
         code: code.to_owned(),
+        category: duckdb_report::FindingCategory::for_code(code),
         severity,
         message: message.into(),
         location,
@@ -738,7 +782,11 @@ fn finding(
     }
 }
 
-fn read_exact_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<(), VerifyError> {
+fn read_exact_at<R: Read + Seek>(
+    file: &mut R,
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), VerifyError> {
     file.seek(SeekFrom::Start(offset))
         .map_err(|source| VerifyError::Io {
             operation: "seek",
@@ -751,7 +799,7 @@ fn read_exact_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<(), 
             Ok(0) => {
                 return Err(VerifyError::Io {
                     operation: "read",
-                    offset: offset + total as u64,
+                    offset: offset.saturating_add(total as u64),
                     source: io::Error::new(io::ErrorKind::UnexpectedEof, "short block read"),
                 });
             }
@@ -760,11 +808,45 @@ fn read_exact_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<(), 
             Err(source) => {
                 return Err(VerifyError::Io {
                     operation: "read",
-                    offset: offset + total as u64,
+                    offset: offset.saturating_add(total as u64),
                     source,
                 });
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ShortReads(std::io::Cursor<Vec<u8>>);
+
+    impl Read for ShortReads {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(2);
+            self.0.read(&mut buffer[..limit])
+        }
+    }
+
+    impl Seek for ShortReads {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.0.seek(position)
+        }
+    }
+
+    #[test]
+    fn block_reads_join_short_reads_and_reject_early_eof() {
+        let mut reader = ShortReads(std::io::Cursor::new(vec![3; 16]));
+        let mut buffer = [0_u8; 16];
+        read_exact_at(&mut reader, 0, &mut buffer).expect("joined short reads");
+        assert_eq!(buffer, [3; 16]);
+
+        let mut reader = ShortReads(std::io::Cursor::new(vec![3; 15]));
+        let error = read_exact_at(&mut reader, 0, &mut buffer).expect_err("early EOF");
+        assert!(
+            matches!(error, VerifyError::Io { source, .. } if source.kind() == io::ErrorKind::UnexpectedEof)
+        );
+    }
 }

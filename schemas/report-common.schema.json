@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/duckdb-forensics/report-common.schema.json",
+  "$defs": {
+    "offset": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "optionalOffset": { "type": ["integer", "null"], "minimum": 0, "maximum": 18446744073709551615 },
+    "pathEncoding": { "enum": ["utf8", "unix_bytes_hex", "windows_utf16_hex", "unspecified"] },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_size", "sha256"],
+      "properties": {
+        "path": { "type": ["string", "null"] },
+        "path_encoding": {
+          "anyOf": [{ "$ref": "#/$defs/pathEncoding" }, { "type": "null" }]
+        },
+        "file_size": { "$ref": "#/$defs/offset" },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "structure_path", "file_offset", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "structure_path": { "type": "string" },
+        "file_offset": { "$ref": "#/$defs/optionalOffset" },
+        "value": true
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "file_offset", "structure_path"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": true,
+        "file_offset": { "$ref": "#/$defs/optionalOffset" },
+        "structure_path": { "type": ["string", "null"] }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_offset", "structure_path"],
+      "properties": {
+        "file_offset": { "$ref": "#/$defs/optionalOffset" },
+        "structure_path": { "type": ["string", "null"] }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "location", "evidence", "remediation_hint", "confidence"],
+      "properties": {
+        "code": { "type": "string" },
+        "category": { "enum": ["corruption", "unsupported", "limit", "unknown", "informational"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "message": { "type": "string" },
+        "location": { "$ref": "#/$defs/location" },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
+        "remediation_hint": { "type": "string" },
+        "confidence": { "enum": ["low", "medium", "high"] }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "subject", "evidence", "confidence"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "subject": { "type": ["string", "null"] },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
+        "confidence": { "enum": ["low", "medium", "high"] }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "structure_path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "structure_path": { "type": ["string", "null"] }
+      }
+    },
+    "skippedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "reason", "structure_path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "reason": { "enum": ["unsupported", "prerequisite_failed", "unavailable", "limit_reached"] },
+        "structure_path": { "type": ["string", "null"] }
+      }
+    },
+    "unknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "structure_path", "reason"],
+      "properties": {
+        "code": { "type": "string" },
+        "structure_path": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checked", "not_checked"],
+      "properties": {
+        "checked": { "type": "array", "items": { "type": "string" } },
+        "not_checked": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "oracleRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purpose", "argv", "working_directory", "timeout_ms", "output_limit_bytes", "exit_code", "timed_out", "killed", "stdout", "stderr", "stdout_truncated", "stderr_truncated", "error"],
+      "properties": {
+        "purpose": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "working_directory": { "type": "string" },
+        "working_directory_encoding": { "$ref": "#/$defs/pathEncoding" },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "output_limit_bytes": { "type": "integer", "minimum": 0 },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" },
+        "killed": { "type": "boolean" },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "stdout_utf8_valid": { "type": "boolean" },
+        "stderr_utf8_valid": { "type": "boolean" },
+        "stdout_hex": { "type": ["string", "null"], "pattern": "^([0-9a-f]{2})*$" },
+        "stderr_hex": { "type": ["string", "null"], "pattern": "^([0-9a-f]{2})*$" },
+        "stdout_truncated": { "type": "boolean" },
+        "stderr_truncated": { "type": "boolean" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "version", "runs", "comparison", "rationale", "copy_hashes_match"],
+      "properties": {
+        "executable": { "type": "string" },
+        "executable_encoding": { "$ref": "#/$defs/pathEncoding" },
+        "version": { "type": ["string", "null"] },
+        "runs": { "type": "array", "items": { "$ref": "#/$defs/oracleRun" } },
+        "comparison": { "enum": ["agreement", "disagreement", "not_comparable"] },
+        "rationale": { "type": "string" },
+        "copy_hashes_match": { "type": ["boolean", "null"] }
+      }
+    }
+  }
+}

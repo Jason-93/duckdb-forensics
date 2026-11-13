@@ -17,6 +17,7 @@ const ISSUE_TRUNCATED: &[u8] = include_bytes!("fixtures/issue19099_truncated.wal
 const ISSUE_ZERO_FILLED: &[u8] = include_bytes!("fixtures/issue19099_zero_filled.wal");
 const ISSUE_MANIFEST: &str = include_str!("fixtures/issue19099.manifest.json");
 const SCHEMA: &str = include_str!("../../../schemas/wal-report.schema.json");
+const COMMON_SCHEMA: &str = include_str!("../../../schemas/report-common.schema.json");
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_duckdb-forensics")
@@ -534,12 +535,18 @@ fn text_output_schema_and_output_file_cover_required_fields() {
             .len()
             == 2
     );
-    assert!(
-        schema["$defs"]["finding"]["properties"]["code"]["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::from("resource_limit_reached"))
-    );
+    let common: Value = serde_json::from_str(COMMON_SCHEMA).expect("common JSON Schema");
+    let common_id = common["$id"].as_str().expect("common schema ID").to_owned();
+    let validator = jsonschema::options()
+        .with_resource(
+            common_id,
+            jsonschema::Resource::from_contents(common).expect("common schema resource"),
+        )
+        .build(&schema)
+        .expect("compile WAL schema");
+    let report_value = serde_json::to_value(run_json(&path)).expect("WAL report JSON");
+    let errors = validator.iter_errors(&report_value).collect::<Vec<_>>();
+    assert!(errors.is_empty(), "WAL Schema errors: {errors:#?}");
 
     let output_path = directory.path().join("wal-report.json");
     let output = run(

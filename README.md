@@ -37,6 +37,19 @@ WAL v1, encrypted WAL v3, and unknown WAL versions return `unsupported_wal_versi
 
 Encrypted database files are identified from the Main Header. Their encrypted Database Headers and blocks are marked `unsupported`, not tested as plaintext checksums.
 
+## Support and verification matrix
+
+| Capability | Support status | Verification boundary |
+|---|---|---|
+| Main Header, Database Headers, checked geometry | Supported for DuckDB v2.0.0 / storage 69 | Official fixture, deterministic damage Corpus, proptest, exact checksum tests |
+| Plaintext Block checksums and bounded metadata chains | Supported for the default eight-byte header layout | Full/default scans, short reads, cycles, bounds, sparse-file and resource-limit tests |
+| Unencrypted WAL v2 framing, Flush and Checkpoint envelopes | Supported; business Payloads remain undecoded | Independent manifests, arbitrary bytes/lengths, exact JSON round trips |
+| `recover-plan` candidate actions | Experimental, advisory only | Tested as data suggestions, never executed or claimed lossless |
+| Official DuckDB Oracle | Experimental auxiliary evidence | Mock process tests are required; a real engine run requires explicit `DUCKDB_V2_0_0` |
+| Other DuckDB versions, encryption, big-endian/alternate layouts | Unsupported | Reported as `unsupported` or `unknown`, never guessed |
+
+Linux, macOS and Windows are built and tested by the CI matrix. A local run on one platform is not evidence that the other platform jobs passed.
+
 ## Non-goals
 
 These phases do not support DuckDB v1.x main files, WAL v1/v3 framing, encrypted-content decoding, big-endian files, alternate block-header sizes, DuckLake, Parquet, MotherDuck, Catalog deserialization, free-list/meta-block payload decoding, Row Groups, column compression, business-data output, row recovery, WAL replay, automatic repair, checkpointing, truncation, or replacement database generation. Recovery plans are advisory only; no candidate action is executed by the tool.
@@ -71,6 +84,8 @@ duckdb-forensics inspect evidence.duckdb --format json --hide-path
 # Write a text report to a separate file
 duckdb-forensics inspect evidence.duckdb --output inspection.txt
 ```
+
+The inspection JSON contract is documented in [`schemas/inspection-report.schema.json`](schemas/inspection-report.schema.json).
 
 ## Inspect a WAL without replay
 
@@ -111,29 +126,29 @@ When a continuously verified `last_good_flush` ends before EOF, a `candidate_wal
 
 Both new commands accept `--duckdb PATH` only for an explicitly supplied official DuckDB v2.0.0 executable. There is no automatic discovery or download. The tool first checks `SELECT version()` in `:memory:`, copies the database and associated WAL to a temporary workspace, disables known-extension autoinstall/autoload through controlled initialization, and only then opens the copy with `ATTACH ... (READ_ONLY)` and a minimal read-only query. Original paths are never passed to DuckDB.
 
-Every invocation records its full argv, exit status, stderr/stdout (bounded to 64 KiB per stream with truncation flags), and a default 30-second timeout. Timeout processes are killed and reaped. The comparison is `agreement`, `disagreement`, or `not_comparable` with a rationale. Oracle success does not override checksum findings or prove unvisited content healthy; unexplained Rust/Oracle differences are reported as `disagreement` rather than hidden.
+Every invocation records its full argv, exit status, stderr/stdout (bounded to 64 KiB per stream with truncation flags and explicit UTF-8 validity/raw hex), and a default 30-second timeout. JSON field order and schemas are stable, but byte-for-byte comparisons across Oracle runs must account for temporary workspace paths and external process output. Timeout processes are killed and reaped. The comparison is `agreement`, `disagreement`, or `not_comparable` with a rationale. Oracle success does not override checksum findings or prove unvisited content healthy; unexplained Rust/Oracle differences are reported as `disagreement` rather than hidden.
 
 The inspector returns exit code 0 when an inspection completes, including reports containing corruption or unsupported-feature findings. Usage, input I/O, serialization, and output-safety failures return exit code 2.
 
 ## Report model
 
-JSON uses schema version `1` and contains:
+JSON uses schema version `1` and contains the following fields. Newly added version 1 metadata is always emitted by this build but is optional when reading older reports; core fields such as `status` remain required.
 
-- `input`: optional normalized path, file size, and streaming SHA-256 (`null` when unavailable);
-- `observations`: direct values with `name`, `structure_path`, and optional `file_offset`;
-- `findings`: stable code, severity, message, location, evidence, remediation hint, and confidence;
+- `input`: optional normalized path and explicit path encoding, file size, and streaming SHA-256 (`null` when unavailable);
+- `observations`: direct values with `name`, `structure_path`, and optional `file_offset`; invalid fixed-text UTF-8 is `null` with raw hex and a validity flag;
+- `findings`: stable code, category (`corruption`, `unsupported`, `limit`, `unknown`, or `informational`), severity, message, location, evidence, remediation hint, and confidence;
 - `inferences`: separate confidence-rated interpretations such as likely active header, possible stale header, or possible torn write;
 - `checks_passed`, `checks_failed`, and `checks_skipped`;
 - `coverage`: checked and explicitly unchecked areas;
 - `unknowns`: facts that cannot be established under the current evidence or support scope.
 
-`--hide-path` sets `input.path` to `null`; it does not suppress file size, hashes, offsets, or diagnostics. Reports contain header metadata only, not table rows.
+`--hide-path` sets `input.path` to `null`; it does not suppress file size, hashes, offsets, or diagnostics. Reports contain header metadata only, not table rows. Non-Unicode paths use an explicit reversible hex encoding rather than silent replacement. JSON integers can cover the full `u64` range: consumers must use 64-bit integers, because JavaScript's default Number loses precision above 2^53.
 
 WAL JSON independently uses schema version `1` and reports version/encryption status, version-header length, file size and SHA-256, per-Entry offsets and lengths, checksum status and type, summary counts, the first unparsed and checksum-failed offsets, scan coverage, unknowns, tail zero evidence, confirmed Flushes, `last_good_flush`, data after that boundary, and an optional Checkpoint Marker. `actual_length` means available Payload bytes capped at `declared_length`.
 
 `last_good_flush` requires a continuously complete, checksum-valid, type-validated prefix ending in an exact WAL_FLUSH. It is not necessarily the last commit acknowledged by the application and is not a safe recovery point. `confirmed_flushes` can additionally contain later physically valid Flush objects after an earlier error; they do not restore continuity. Checksum mismatch alone does not prove torn write, and a zero-filled tail is only evidence.
 
-Verify JSON independently uses schema version `1` and adds selected-header details, bounded block anomalies, metadata-chain termination/capacity/cycle status, trailing-data classification, and explicit integrity coverage. Recovery-plan JSON independently uses schema version `1`; its candidate actions are data objects, not executable instructions.
+Verify JSON independently uses schema version `1` and adds selected-header details, bounded block anomalies, metadata-chain termination/capacity/cycle status, trailing-data classification, and explicit integrity coverage. Recovery-plan JSON independently uses schema version `1`; its candidate actions are data objects, not executable instructions. All four report contracts, including `inspect`, are validated in tests.
 
 Stable main-file finding codes include `invalid_magic`, `checksum_mismatch`, `truncated_file`, `unsupported_storage_version`, `unsupported_encryption`, `invalid_block_alloc_size`, `invalid_block_count`, `invalid_metadata_pointer`, `invalid_block_reference`, `geometry_overflow`, `no_valid_database_header`, and `limit_reached`.
 
@@ -146,11 +161,15 @@ Additional verify findings include `truncated_block`, `block_out_of_bounds`, `tr
 - `DB_PATH`, `WAL_PATH`, and `EVIDENCE_DIR` inputs are opened read-only. Without `--duckdb`, the tool does not invoke DuckDB, create a WAL, trigger a checkpoint, replay a WAL, or modify any input.
 - Oracle writes are confined to a temporary copy workspace. The original evidence is hashed again after recovery-plan analysis.
 - For `inspect` and `wal`, the only optional write is the report supplied through `--output`. `verify` and `recover-plan` write reports only to stdout.
-- An output path that resolves to the input is rejected. Symlink resolution and Unix device/inode checks also protect existing aliases and hard links. The opened output identity is checked again before truncation.
+- An output path that resolves to the input is rejected. Symlink resolution and opened-file identity checks protect existing aliases and hard links on Unix and Windows. The opened output identity is checked again before truncation; non-regular inputs and outputs are rejected.
 - Remediation text is advisory only and is never executed.
 - Corrupt, empty, random, truncated, unsupported, and overflow-inducing inputs produce structured diagnostics rather than parser panics.
 
-Always preserve the original evidence and perform any separate database operation on a copy.
+### Threat model and disclaimer
+
+The parser treats file bytes, declared lengths, pointers, directory depth and text encoding as untrusted. Resource budgets limit accidental denial of service; they are not a wall-clock or memory sandbox, and hashing an in-budget sparse file still requires linear I/O. Detection of concurrent modification is best-effort, not protection against a malicious local process. A user-supplied Oracle executable must already be trusted: the tool confines its documented evidence writes to copies but does not sandbox arbitrary native code.
+
+No report guarantees database health, application commit durability, complete corruption detection, recoverability, or lossless recovery. Preserve original evidence and perform every separate database operation on a copy. `corruption` means a structural/integrity violation, not a proven physical cause; `unknown`, `unsupported`, and `limit` are separate from that verdict.
 
 ## Resource limits
 
@@ -158,9 +177,9 @@ The inspector reads at most three fixed 4096-byte header pages and streams SHA-2
 
 The default main-file size budget is 1 TiB. A larger input stops before hashing and header parsing with `limit_reached`; SHA-256 and unchecked fields remain unknown. Resource exhaustion is not reported as corruption.
 
-WAL inspection defaults to 1 TiB per file, 1,000,000 Entry candidates, and 256 MiB declared Payload per Entry. Payload checksum and tail reads use fixed 1 MiB chunks; memory is never allocated from an unchecked declared Entry length. WAL budget exhaustion produces `resource_limit_reached` and preserves the stop offset. If the initial file budget stops processing, SHA-256 is `null`.
+WAL inspection defaults to 1 TiB per file, 1,000,000 Entry candidates, and 256 MiB declared Payload per Entry. Reports retain at most 10,000 Entries and confirmed Flushes by default, and at most 1,000 Findings plus 1,000 Unknowns. Scan totals, retained totals, omitted totals, and `report_limits` are separate; omitted Entries are not called absent or healthy. Payload checksum and tail reads use fixed 1 MiB chunks; memory is never allocated from an unchecked declared Entry length. WAL budget exhaustion produces `resource_limit_reached` and preserves the stop offset. If the initial file budget stops processing, SHA-256 is `null`.
 
-Verify uses bounded 16–256 KiB block buffers, at most 1,000,000 nodes per metadata chain, and at most 1,000 retained block issues. Normal blocks are counted rather than accumulated in the report. Recovery inventories at most 100,000 regular files and streams every hash. Oracle defaults to 30 seconds and 64 KiB retained output per stream. Resource/report limits preserve omitted counts or unknown coverage and are not corruption verdicts.
+Verify uses bounded 16–256 KiB block buffers, at most 1,000,000 nodes per metadata chain, and at most 1,000 retained block issues. Normal blocks are counted rather than accumulated in the report. Recovery iteratively inventories at most 100,000 directory entries, depth 64, and 1 TiB total hashed bytes, stopping as soon as a budget is exceeded. Incomplete inventories suppress candidate actions. Oracle defaults to 30 seconds and 64 KiB retained output per stream. Resource/report limits preserve omitted counts or unknown coverage and are not corruption verdicts.
 
 ## Reproducible fixture generation
 
@@ -188,15 +207,33 @@ python3 scripts/generate_wal_fixtures.py
 
 This stdlib-only generator does not invoke DuckDB or the Rust parser. It writes `normal.wal`, independent per-Entry expectations, and the Issue #19099 historical corpus: one file truncated at a fixed in-Entry offset and another zero-filled from that same offset to the original EOF. The corpus makes no claim that current DuckDB still has the historical bug.
 
-Tests never require network access or DuckDB. An additional real-Oracle test runs only when `DUCKDB_V2_0_0=/path/to/duckdb` is explicitly set; mocked Oracle tests cover failure, timeout, output limits, and copy isolation without DuckDB.
+Generate the public fault Corpus with:
+
+```sh
+python3 scripts/generate_fault_corpus.py --output target/fault-corpus
+# Optional: create the 2 TiB sparse resource-limit case without reading it.
+python3 scripts/generate_fault_corpus.py --output target/fault-corpus-sparse --include-sparse
+```
+
+`corpus/manifest.json` stores independent source/output hashes, byte patches, expected categories, and offsets. Generated files go to a separate output directory, never over evidence. The default omits only the huge sparse case; the other 15 cases are small patch-derived files.
+
+Tests never require network access or DuckDB. Python 3 is required for the public Corpus integration test. An additional real-Oracle test runs only when `DUCKDB_V2_0_0=/path/to/duckdb` is explicitly set; mocked Oracle tests cover failure, timeout, output limits, and copy isolation without DuckDB.
 
 ## Test and lint
 
 ```sh
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
+
+Property tests use proptest with file-based failure persistence and shrinking. Re-run one parser property with:
+
+```sh
+cargo test -p duckdb-forensics --test parser_properties extreme_wal_lengths_never_panic -- --exact
+```
+
+On failure, preserve the minimized case and generated `proptest-regressions` entry; add a deterministic regression or public Corpus case after diagnosis. Do not delete, ignore, or weaken an unexplained failure. JSON Schema tests validate real reports, and an exact floating-point round-trip regression guards against lossy percent parsing.
 
 Main-file tests cover the official normal fixture, empty/non-DuckDB/random files, Main Header bit flips, either/both Database Headers corrupted, truncation, invalid block allocation size, huge block counts, unsupported encryption/version behavior, stable JSON deserialization, text output, hidden paths, output files, and direct/hard-link overwrite attempts. CLI helpers verify that input SHA-256 is unchanged and that no WAL appears.
 
@@ -209,4 +246,4 @@ Verify tests cover full/default scans, isolated block damage, truncation, extra 
 - `crates/duckdb-format`: fixed-page reads, scalar parsing, DuckDB checksum, checked block/metadata geometry, WAL v2 frame/envelope parsing, and format errors.
 - `crates/duckdb-report`: observation/finding/inference model, main-file, verification, recovery, Oracle, and WAL JSON types and text rendering.
 - `crates/duckdb-forensics`: read-only analysis pipelines, advisory recovery planning, isolated Oracle execution, CLI, streaming hashes/checksums, and resource limits.
-- `schemas/wal-report.schema.json`, `schemas/verify-report.schema.json`, and `schemas/recovery-plan.schema.json`: independent JSON Schema version 1 contracts.
+- `schemas/inspection-report.schema.json`, `schemas/wal-report.schema.json`, `schemas/verify-report.schema.json`, and `schemas/recovery-plan.schema.json`: independent JSON Schema version 1 contracts, with shared definitions in `schemas/report-common.schema.json`.

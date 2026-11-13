@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/duckdb-forensics/verify-report.schema.json",
   "title": "duckdb-forensics main-file verification report",
-  "description": "Read-only checksum, geometry, and metadata-chain verification. Complete status is not a database-health or recoverability verdict.",
+  "description": "Read-only checksum, geometry, and metadata-chain verification; not a database-health verdict.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "tool_version", "status", "input", "observations", "selected_header", "blocks", "meta_chains", "trailing_data", "coverage", "findings", "inferences", "checks_passed", "checks_failed", "checks_skipped", "unknowns", "oracle"],
@@ -10,55 +10,33 @@
     "schema_version": { "const": "1" },
     "tool_version": { "type": "string" },
     "status": { "enum": ["complete", "incomplete", "unsupported", "resource_limit_reached"] },
-    "input": { "$ref": "#/$defs/input" },
-    "observations": { "type": "array", "items": { "$ref": "#/$defs/observation" } },
+    "input": { "$ref": "report-common.schema.json#/$defs/input" },
+    "observations": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/observation" } },
     "selected_header": { "anyOf": [{ "$ref": "#/$defs/selectedHeader" }, { "type": "null" }] },
     "blocks": { "$ref": "#/$defs/blocks" },
     "meta_chains": { "type": "array", "items": { "$ref": "#/$defs/metaChain" } },
     "trailing_data": { "$ref": "#/$defs/trailing" },
     "coverage": { "$ref": "#/$defs/coverage" },
-    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
-    "inferences": { "type": "array" },
-    "checks_passed": { "type": "array" },
-    "checks_failed": { "type": "array" },
-    "checks_skipped": { "type": "array" },
-    "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } },
-    "oracle": { "anyOf": [{ "$ref": "#/$defs/oracle" }, { "type": "null" }] }
+    "findings": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/finding" } },
+    "inferences": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/inference" } },
+    "checks_passed": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/check" } },
+    "checks_failed": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/check" } },
+    "checks_skipped": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/skippedCheck" } },
+    "unknowns": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/unknown" } },
+    "oracle": { "anyOf": [{ "$ref": "report-common.schema.json#/$defs/oracle" }, { "type": "null" }] }
   },
   "$defs": {
-    "offset": { "type": "integer", "minimum": 0 },
-    "optionalOffset": { "type": ["integer", "null"], "minimum": 0 },
-    "input": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "file_size", "sha256"],
-      "properties": {
-        "path": { "type": ["string", "null"] },
-        "file_size": { "$ref": "#/$defs/offset" },
-        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
-      }
-    },
-    "observation": {
-      "type": "object",
-      "required": ["name", "structure_path", "file_offset", "value"],
-      "properties": {
-        "name": { "type": "string" },
-        "structure_path": { "type": "string" },
-        "file_offset": { "$ref": "#/$defs/optionalOffset" },
-        "value": true
-      }
-    },
     "selectedHeader": {
       "type": "object",
       "additionalProperties": false,
       "required": ["index", "iteration", "block_count", "block_alloc_size", "meta_block", "free_list"],
       "properties": {
         "index": { "type": "integer", "minimum": 0, "maximum": 1 },
-        "iteration": { "$ref": "#/$defs/offset" },
-        "block_count": { "$ref": "#/$defs/offset" },
-        "block_alloc_size": { "$ref": "#/$defs/offset" },
-        "meta_block": { "$ref": "#/$defs/offset" },
-        "free_list": { "$ref": "#/$defs/offset" }
+        "iteration": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "block_count": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "block_alloc_size": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "meta_block": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "free_list": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "issue": {
@@ -67,10 +45,10 @@
       "required": ["kind", "block_id", "offset", "expected_length", "actual_length", "message"],
       "properties": {
         "kind": { "enum": ["checksum_mismatch", "truncated_block", "out_of_bounds", "trailing_data"] },
-        "block_id": { "$ref": "#/$defs/optionalOffset" },
-        "offset": { "$ref": "#/$defs/offset" },
-        "expected_length": { "$ref": "#/$defs/optionalOffset" },
-        "actual_length": { "$ref": "#/$defs/optionalOffset" },
+        "block_id": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "expected_length": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "actual_length": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
         "message": { "type": "string" }
       }
     },
@@ -80,16 +58,16 @@
       "required": ["full_scan_requested", "physical_blocks_scanned", "metadata_blocks_checked", "valid_checksums", "checksum_mismatches", "truncated_blocks", "out_of_bounds_references", "complete_blocks_beyond_header_count", "trailing_bytes", "issues", "issues_omitted"],
       "properties": {
         "full_scan_requested": { "type": "boolean" },
-        "physical_blocks_scanned": { "$ref": "#/$defs/offset" },
-        "metadata_blocks_checked": { "$ref": "#/$defs/offset" },
-        "valid_checksums": { "$ref": "#/$defs/offset" },
-        "checksum_mismatches": { "$ref": "#/$defs/offset" },
-        "truncated_blocks": { "$ref": "#/$defs/offset" },
-        "out_of_bounds_references": { "$ref": "#/$defs/offset" },
-        "complete_blocks_beyond_header_count": { "$ref": "#/$defs/offset" },
-        "trailing_bytes": { "$ref": "#/$defs/offset" },
+        "physical_blocks_scanned": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "metadata_blocks_checked": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "valid_checksums": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "checksum_mismatches": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "truncated_blocks": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "out_of_bounds_references": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "complete_blocks_beyond_header_count": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "trailing_bytes": { "$ref": "report-common.schema.json#/$defs/offset" },
         "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } },
-        "issues_omitted": { "$ref": "#/$defs/offset" }
+        "issues_omitted": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "metaChain": {
@@ -97,14 +75,14 @@
       "additionalProperties": false,
       "required": ["name", "root_pointer", "status", "visited_nodes", "verified_nodes", "payload_capacity", "stop_offset", "cycle_pointer"],
       "properties": {
-        "name": { "type": "string" },
-        "root_pointer": { "$ref": "#/$defs/offset" },
+        "name": { "enum": ["meta_block", "free_list"] },
+        "root_pointer": { "$ref": "report-common.schema.json#/$defs/offset" },
         "status": { "enum": ["terminated", "not_present", "cycle", "invalid_pointer", "checksum_unavailable", "unsupported", "resource_limit_reached"] },
-        "visited_nodes": { "$ref": "#/$defs/offset" },
-        "verified_nodes": { "$ref": "#/$defs/offset" },
-        "payload_capacity": { "$ref": "#/$defs/offset" },
-        "stop_offset": { "$ref": "#/$defs/optionalOffset" },
-        "cycle_pointer": { "$ref": "#/$defs/optionalOffset" }
+        "visited_nodes": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "verified_nodes": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "payload_capacity": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "stop_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "cycle_pointer": { "$ref": "report-common.schema.json#/$defs/optionalOffset" }
       }
     },
     "trailing": {
@@ -112,10 +90,10 @@
       "additionalProperties": false,
       "required": ["recorded_file_end", "complete_blocks_beyond_header_count", "residual_offset", "residual_bytes"],
       "properties": {
-        "recorded_file_end": { "$ref": "#/$defs/optionalOffset" },
-        "complete_blocks_beyond_header_count": { "$ref": "#/$defs/offset" },
-        "residual_offset": { "$ref": "#/$defs/optionalOffset" },
-        "residual_bytes": { "$ref": "#/$defs/offset" }
+        "recorded_file_end": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "complete_blocks_beyond_header_count": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "residual_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "residual_bytes": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "coverage": {
@@ -123,68 +101,14 @@
       "additionalProperties": false,
       "required": ["file_size", "integrity_checked_bytes", "integrity_checked_percent", "meta_checked_bytes", "checked", "not_checked", "unsupported", "unavailable"],
       "properties": {
-        "file_size": { "$ref": "#/$defs/offset" },
-        "integrity_checked_bytes": { "$ref": "#/$defs/offset" },
+        "file_size": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "integrity_checked_bytes": { "$ref": "report-common.schema.json#/$defs/offset" },
         "integrity_checked_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-        "meta_checked_bytes": { "$ref": "#/$defs/offset" },
+        "meta_checked_bytes": { "$ref": "report-common.schema.json#/$defs/offset" },
         "checked": { "type": "array", "items": { "type": "string" } },
         "not_checked": { "type": "array", "items": { "type": "string" } },
         "unsupported": { "type": "array", "items": { "type": "string" } },
         "unavailable": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "finding": {
-      "type": "object",
-      "required": ["code", "severity", "message", "location", "evidence", "remediation_hint", "confidence"],
-      "properties": {
-        "code": { "type": "string" },
-        "severity": { "enum": ["info", "warning", "error"] },
-        "message": { "type": "string" },
-        "location": { "type": "object" },
-        "evidence": { "type": "array" },
-        "remediation_hint": { "type": "string" },
-        "confidence": { "enum": ["low", "medium", "high"] }
-      }
-    },
-    "unknown": {
-      "type": "object",
-      "required": ["code", "structure_path", "reason"],
-      "properties": {
-        "code": { "type": "string" },
-        "structure_path": { "type": "string" },
-        "reason": { "type": "string" }
-      }
-    },
-    "oracleRun": {
-      "type": "object",
-      "required": ["purpose", "argv", "working_directory", "timeout_ms", "output_limit_bytes", "exit_code", "timed_out", "killed", "stdout", "stderr", "stdout_truncated", "stderr_truncated", "error"],
-      "properties": {
-        "purpose": { "type": "string" },
-        "argv": { "type": "array", "items": { "type": "string" } },
-        "working_directory": { "type": "string" },
-        "timeout_ms": { "type": "integer", "minimum": 1 },
-        "output_limit_bytes": { "type": "integer", "minimum": 1 },
-        "exit_code": { "type": ["integer", "null"] },
-        "timed_out": { "type": "boolean" },
-        "killed": { "type": "boolean" },
-        "stdout": { "type": "string" },
-        "stderr": { "type": "string" },
-        "stdout_truncated": { "type": "boolean" },
-        "stderr_truncated": { "type": "boolean" },
-        "error": { "type": ["string", "null"] }
-      }
-    },
-    "oracle": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["executable", "version", "runs", "comparison", "rationale", "copy_hashes_match"],
-      "properties": {
-        "executable": { "type": "string" },
-        "version": { "type": ["string", "null"] },
-        "runs": { "type": "array", "items": { "$ref": "#/$defs/oracleRun" } },
-        "comparison": { "enum": ["agreement", "disagreement", "not_comparable"] },
-        "rationale": { "type": "string" },
-        "copy_hashes_match": { "type": ["boolean", "null"] }
       }
     }
   }

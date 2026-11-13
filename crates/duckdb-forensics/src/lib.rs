@@ -4,6 +4,7 @@ pub mod inspect;
 pub mod oracle;
 pub mod output;
 pub mod recover;
+mod util;
 pub mod verify;
 pub mod wal;
 

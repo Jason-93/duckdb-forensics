@@ -2,123 +2,85 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/duckdb-forensics/wal-report.schema.json",
   "title": "duckdb-forensics WAL report",
-  "description": "Offline frame analysis for an unencrypted DuckDB v2 WAL. actual_length is the number of Payload bytes present, capped at declared_length. last_good_flush is a continuously verified structural boundary, not an acknowledged application commit or a safe recovery point.",
+  "description": "Offline frame analysis for an unencrypted DuckDB v2 WAL. last_good_flush is not an acknowledged commit or a safe recovery point.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version", "tool_version", "status", "input", "version", "encrypted",
-    "version_header", "entries", "summary", "first_unparsed_offset",
-    "first_checksum_mismatch_offset", "scan_stop_offset", "tail", "confirmed_flushes",
-    "last_good_flush", "unterminated_data_after_last_flush", "checkpoint_marker",
-    "coverage", "findings", "inferences", "unknowns"
-  ],
+  "required": ["schema_version", "tool_version", "status", "input", "version", "encrypted", "version_header", "entries", "summary", "first_unparsed_offset", "first_checksum_mismatch_offset", "scan_stop_offset", "tail", "confirmed_flushes", "last_good_flush", "unterminated_data_after_last_flush", "checkpoint_marker", "coverage", "findings", "inferences", "unknowns"],
   "properties": {
     "schema_version": { "const": "1" },
     "tool_version": { "type": "string" },
-    "status": { "$ref": "#/$defs/status" },
-    "input": { "$ref": "#/$defs/input" },
-    "version": { "type": ["integer", "null"], "minimum": 0 },
+    "status": { "enum": ["complete", "incomplete", "empty", "unsupported", "invalid", "resource_limit_reached"] },
+    "input": { "$ref": "report-common.schema.json#/$defs/input" },
+    "version": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
     "encrypted": { "type": ["boolean", "null"] },
-    "version_header": {
-      "anyOf": [
-        { "$ref": "#/$defs/versionHeader" },
-        { "type": "null" }
-      ]
-    },
+    "version_header": { "anyOf": [{ "$ref": "#/$defs/versionHeader" }, { "type": "null" }] },
     "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } },
     "summary": { "$ref": "#/$defs/summary" },
-    "first_unparsed_offset": { "$ref": "#/$defs/optionalOffset" },
-    "first_checksum_mismatch_offset": { "$ref": "#/$defs/optionalOffset" },
-    "scan_stop_offset": { "type": "integer", "minimum": 0 },
+    "first_unparsed_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+    "first_checksum_mismatch_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+    "scan_stop_offset": { "$ref": "report-common.schema.json#/$defs/offset" },
     "tail": { "$ref": "#/$defs/tail" },
     "confirmed_flushes": { "type": "array", "items": { "$ref": "#/$defs/flush" } },
-    "last_good_flush": {
-      "anyOf": [{ "$ref": "#/$defs/flush" }, { "type": "null" }]
-    },
+    "confirmed_flushes_omitted": { "$ref": "report-common.schema.json#/$defs/offset" },
+    "last_good_flush": { "anyOf": [{ "$ref": "#/$defs/flush" }, { "type": "null" }] },
     "unterminated_data_after_last_flush": { "type": "boolean" },
-    "checkpoint_marker": {
-      "anyOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "null" }]
-    },
+    "checkpoint_marker": { "anyOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "null" }] },
     "coverage": { "$ref": "#/$defs/coverage" },
-    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
-    "inferences": { "type": "array", "items": { "$ref": "#/$defs/inference" } },
-    "unknowns": { "type": "array", "items": { "$ref": "#/$defs/unknown" } }
+    "findings": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/finding" } },
+    "findings_omitted": { "$ref": "report-common.schema.json#/$defs/offset" },
+    "inferences": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/inference" } },
+    "unknowns": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/unknown" } },
+    "unknowns_omitted": { "$ref": "report-common.schema.json#/$defs/offset" },
+    "report_limits": { "type": "array", "items": { "enum": ["entries", "confirmed_flushes", "findings", "unknowns"] }, "uniqueItems": true }
   },
   "$defs": {
-    "offset": { "type": "integer", "minimum": 0 },
-    "optionalOffset": { "type": ["integer", "null"], "minimum": 0 },
-    "status": {
-      "type": "string",
-      "enum": ["complete", "incomplete", "empty", "unsupported", "invalid", "resource_limit_reached"]
-    },
-    "input": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "file_size", "sha256"],
-      "properties": {
-        "path": { "type": ["string", "null"] },
-        "file_size": { "$ref": "#/$defs/offset" },
-        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
-      }
-    },
     "versionHeader": {
       "type": "object",
       "additionalProperties": false,
       "required": ["offset", "length", "checkpoint_iteration"],
       "properties": {
-        "offset": { "$ref": "#/$defs/offset" },
-        "length": { "$ref": "#/$defs/offset" },
-        "checkpoint_iteration": { "$ref": "#/$defs/optionalOffset" }
+        "offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "length": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "checkpoint_iteration": { "$ref": "report-common.schema.json#/$defs/optionalOffset" }
       }
     },
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "index", "offset", "payload_offset", "declared_length", "actual_length",
-        "actual_frame_length", "declared_frame_end", "actual_frame_end",
-        "stored_checksum", "computed_checksum", "checksum_status", "entry_type",
-        "raw_entry_type", "entry_type_reason", "payload_status", "parse_status"
-      ],
+      "required": ["index", "offset", "payload_offset", "declared_length", "actual_length", "actual_frame_length", "declared_frame_end", "actual_frame_end", "stored_checksum", "computed_checksum", "checksum_status", "entry_type", "raw_entry_type", "entry_type_reason", "payload_status", "parse_status"],
       "properties": {
-        "index": { "$ref": "#/$defs/offset" },
-        "offset": { "$ref": "#/$defs/offset" },
-        "payload_offset": { "$ref": "#/$defs/optionalOffset" },
-        "declared_length": { "$ref": "#/$defs/optionalOffset" },
-        "actual_length": { "$ref": "#/$defs/offset" },
-        "actual_frame_length": { "$ref": "#/$defs/offset" },
-        "declared_frame_end": { "$ref": "#/$defs/optionalOffset" },
-        "actual_frame_end": { "$ref": "#/$defs/offset" },
+        "index": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "payload_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "declared_length": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "actual_length": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "actual_frame_length": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "declared_frame_end": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "actual_frame_end": { "$ref": "report-common.schema.json#/$defs/offset" },
         "stored_checksum": { "type": ["string", "null"], "pattern": "^0x[0-9a-f]{16}$" },
         "computed_checksum": { "type": ["string", "null"], "pattern": "^0x[0-9a-f]{16}$" },
-        "checksum_status": { "type": "string", "enum": ["valid", "mismatch", "unavailable"] },
+        "checksum_status": { "enum": ["valid", "mismatch", "unavailable"] },
         "entry_type": { "type": "string" },
         "raw_entry_type": { "type": ["integer", "null"], "minimum": 0, "maximum": 255 },
         "entry_type_reason": { "type": ["string", "null"] },
-        "payload_status": {
-          "type": "string",
-          "enum": ["not_decoded", "empty_flush", "checkpoint_decoded", "invalid", "unavailable"]
-        },
-        "parse_status": {
-          "type": "string",
-          "enum": ["complete", "checksum_mismatch", "invalid_entry_length", "entry_exceeds_remaining_file", "truncated_entry", "resource_limit_reached"]
-        }
+        "payload_status": { "enum": ["not_decoded", "empty_flush", "checkpoint_decoded", "invalid", "unavailable"] },
+        "parse_status": { "enum": ["complete", "checksum_mismatch", "invalid_entry_length", "entry_exceeds_remaining_file", "truncated_entry", "resource_limit_reached"] }
       }
     },
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "total_entries", "successfully_parsed_entries", "checksum_failed_entries",
-        "out_of_bounds_entries", "truncated_entries", "unknown_type_entries"
-      ],
+      "required": ["total_entries", "successfully_parsed_entries", "checksum_failed_entries", "out_of_bounds_entries", "truncated_entries", "unknown_type_entries"],
       "properties": {
-        "total_entries": { "$ref": "#/$defs/offset" },
-        "successfully_parsed_entries": { "$ref": "#/$defs/offset" },
-        "checksum_failed_entries": { "$ref": "#/$defs/offset" },
-        "out_of_bounds_entries": { "$ref": "#/$defs/offset" },
-        "truncated_entries": { "$ref": "#/$defs/offset" },
-        "unknown_type_entries": { "$ref": "#/$defs/offset" }
+        "total_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "reported_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "entries_omitted": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "successfully_parsed_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "checksum_failed_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "out_of_bounds_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "truncated_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "unknown_type_entries": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "not_decoded_entries": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "flush": {
@@ -126,9 +88,9 @@
       "additionalProperties": false,
       "required": ["entry_index", "entry_offset", "end_offset"],
       "properties": {
-        "entry_index": { "$ref": "#/$defs/offset" },
-        "entry_offset": { "$ref": "#/$defs/offset" },
-        "end_offset": { "$ref": "#/$defs/offset" }
+        "entry_index": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "entry_offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "end_offset": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "checkpoint": {
@@ -136,9 +98,9 @@
       "additionalProperties": false,
       "required": ["entry_index", "entry_offset", "block_pointer", "offset_within_block"],
       "properties": {
-        "entry_index": { "$ref": "#/$defs/offset" },
-        "entry_offset": { "$ref": "#/$defs/offset" },
-        "block_pointer": { "$ref": "#/$defs/offset" },
+        "entry_index": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "entry_offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "block_pointer": { "$ref": "report-common.schema.json#/$defs/offset" },
         "offset_within_block": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
       }
     },
@@ -147,93 +109,24 @@
       "additionalProperties": false,
       "required": ["offset", "length", "all_zero", "zero_suffix_offset", "zero_suffix_length"],
       "properties": {
-        "offset": { "$ref": "#/$defs/offset" },
-        "length": { "$ref": "#/$defs/offset" },
+        "offset": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "length": { "$ref": "report-common.schema.json#/$defs/offset" },
         "all_zero": { "type": ["boolean", "null"] },
-        "zero_suffix_offset": { "$ref": "#/$defs/optionalOffset" },
-        "zero_suffix_length": { "$ref": "#/$defs/offset" }
+        "zero_suffix_offset": { "$ref": "report-common.schema.json#/$defs/optionalOffset" },
+        "zero_suffix_length": { "$ref": "report-common.schema.json#/$defs/offset" }
       }
     },
     "coverage": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "file_size", "scanned_bytes", "scanned_percent", "complete_frame_bytes",
-        "complete_frame_percent", "payload_decoding"
-      ],
+      "required": ["file_size", "scanned_bytes", "scanned_percent", "complete_frame_bytes", "complete_frame_percent", "payload_decoding"],
       "properties": {
-        "file_size": { "$ref": "#/$defs/offset" },
-        "scanned_bytes": { "$ref": "#/$defs/offset" },
+        "file_size": { "$ref": "report-common.schema.json#/$defs/offset" },
+        "scanned_bytes": { "$ref": "report-common.schema.json#/$defs/offset" },
         "scanned_percent": { "type": "number", "minimum": 0, "maximum": 100 },
-        "complete_frame_bytes": { "$ref": "#/$defs/offset" },
+        "complete_frame_bytes": { "$ref": "report-common.schema.json#/$defs/offset" },
         "complete_frame_percent": { "type": "number", "minimum": 0, "maximum": 100 },
         "payload_decoding": { "const": "wal_type_envelope_flush_and_checkpoint_only" }
-      }
-    },
-    "evidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "value", "file_offset", "structure_path"],
-      "properties": {
-        "name": { "type": "string" },
-        "value": true,
-        "file_offset": { "$ref": "#/$defs/optionalOffset" },
-        "structure_path": { "type": ["string", "null"] }
-      }
-    },
-    "location": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["file_offset", "structure_path"],
-      "properties": {
-        "file_offset": { "$ref": "#/$defs/optionalOffset" },
-        "structure_path": { "type": ["string", "null"] }
-      }
-    },
-    "finding": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "code", "severity", "message", "location", "evidence", "remediation_hint", "confidence"
-      ],
-      "properties": {
-        "code": {
-          "type": "string",
-          "enum": [
-            "empty_wal", "unsupported_wal_version", "invalid_wal_header",
-            "invalid_entry_length", "entry_exceeds_remaining_file", "checksum_mismatch",
-            "truncated_entry", "zero_filled_tail", "unparsed_trailing_data",
-            "resource_limit_reached"
-          ]
-        },
-        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
-        "message": { "type": "string" },
-        "location": { "$ref": "#/$defs/location" },
-        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "remediation_hint": { "type": "string" },
-        "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
-      }
-    },
-    "inference": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["code", "message", "subject", "evidence", "confidence"],
-      "properties": {
-        "code": { "const": "zero_filled_tail_evidence" },
-        "message": { "type": "string" },
-        "subject": { "type": ["string", "null"] },
-        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
-      }
-    },
-    "unknown": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["code", "structure_path", "reason"],
-      "properties": {
-        "code": { "type": "string" },
-        "structure_path": { "type": "string" },
-        "reason": { "type": "string" }
       }
     }
   }

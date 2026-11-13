@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Finding, Inference, InputInfo, Unknown};
 
+const REPORT_DIAGNOSTIC_LIMIT: usize = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalStatus {
@@ -71,14 +73,59 @@ pub struct WalEntryReport {
     pub parse_status: WalEntryParseStatus,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct WalSummary {
     pub total_entries: u64,
+    pub reported_entries: u64,
+    pub entries_omitted: u64,
     pub successfully_parsed_entries: u64,
     pub checksum_failed_entries: u64,
     pub out_of_bounds_entries: u64,
     pub truncated_entries: u64,
     pub unknown_type_entries: u64,
+    pub not_decoded_entries: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WalSummaryDef {
+    total_entries: Option<u64>,
+    reported_entries: Option<u64>,
+    entries_omitted: u64,
+    successfully_parsed_entries: u64,
+    checksum_failed_entries: u64,
+    out_of_bounds_entries: u64,
+    truncated_entries: u64,
+    unknown_type_entries: u64,
+    not_decoded_entries: u64,
+}
+
+impl<'de> Deserialize<'de> for WalSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = WalSummaryDef::deserialize(deserializer)?;
+        let total_entries = value.total_entries.unwrap_or_else(|| {
+            value
+                .reported_entries
+                .unwrap_or(0)
+                .saturating_add(value.entries_omitted)
+        });
+        Ok(Self {
+            total_entries,
+            reported_entries: value
+                .reported_entries
+                .unwrap_or_else(|| total_entries.saturating_sub(value.entries_omitted)),
+            entries_omitted: value.entries_omitted,
+            successfully_parsed_entries: value.successfully_parsed_entries,
+            checksum_failed_entries: value.checksum_failed_entries,
+            out_of_bounds_entries: value.out_of_bounds_entries,
+            truncated_entries: value.truncated_entries,
+            unknown_type_entries: value.unknown_type_entries,
+            not_decoded_entries: value.not_decoded_entries,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,13 +178,21 @@ pub struct WalReport {
     pub scan_stop_offset: u64,
     pub tail: WalTailReport,
     pub confirmed_flushes: Vec<WalFlushBoundary>,
+    #[serde(default)]
+    pub confirmed_flushes_omitted: u64,
     pub last_good_flush: Option<WalFlushBoundary>,
     pub unterminated_data_after_last_flush: bool,
     pub checkpoint_marker: Option<WalCheckpointReport>,
     pub coverage: WalCoverage,
     pub findings: Vec<Finding>,
+    #[serde(default)]
+    pub findings_omitted: u64,
     pub inferences: Vec<Inference>,
     pub unknowns: Vec<Unknown>,
+    #[serde(default)]
+    pub unknowns_omitted: u64,
+    #[serde(default)]
+    pub report_limits: Vec<String>,
 }
 
 impl WalReport {
@@ -164,6 +219,7 @@ impl WalReport {
                 zero_suffix_length: 0,
             },
             confirmed_flushes: Vec::new(),
+            confirmed_flushes_omitted: 0,
             last_good_flush: None,
             unterminated_data_after_last_flush: false,
             checkpoint_marker: None,
@@ -176,13 +232,16 @@ impl WalReport {
                 payload_decoding: "wal_type_envelope_flush_and_checkpoint_only".to_owned(),
             },
             findings: Vec::new(),
+            findings_omitted: 0,
             inferences: Vec::new(),
             unknowns: Vec::new(),
+            unknowns_omitted: 0,
+            report_limits: Vec::new(),
         }
     }
 
     pub fn finalize(&mut self) {
-        self.summary.total_entries = self.entries.len() as u64;
+        self.summary.reported_entries = self.entries.len() as u64;
         self.coverage.scanned_bytes = self.scan_stop_offset.min(self.input.file_size);
         self.coverage.scanned_percent = percent(self.coverage.scanned_bytes, self.input.file_size);
         self.coverage.complete_frame_percent =
@@ -193,6 +252,49 @@ impl WalReport {
         };
         self.tail.offset = self.scan_stop_offset.min(self.input.file_size);
         self.tail.length = self.input.file_size.saturating_sub(self.tail.offset);
+    }
+
+    pub fn retain_entry(&mut self, entry: WalEntryReport, limit: usize) {
+        self.summary.total_entries = self.summary.total_entries.saturating_add(1);
+        if self.entries.len() < limit {
+            self.entries.push(entry);
+        } else {
+            self.summary.entries_omitted = self.summary.entries_omitted.saturating_add(1);
+            self.note_report_limit("entries");
+        }
+    }
+
+    pub fn retain_flush(&mut self, flush: WalFlushBoundary, limit: usize) {
+        if self.confirmed_flushes.len() < limit {
+            self.confirmed_flushes.push(flush);
+        } else {
+            self.confirmed_flushes_omitted = self.confirmed_flushes_omitted.saturating_add(1);
+            self.note_report_limit("confirmed_flushes");
+        }
+    }
+
+    pub fn retain_finding(&mut self, finding: Finding) {
+        if self.findings.len() < REPORT_DIAGNOSTIC_LIMIT {
+            self.findings.push(finding);
+        } else {
+            self.findings_omitted = self.findings_omitted.saturating_add(1);
+            self.note_report_limit("findings");
+        }
+    }
+
+    pub fn retain_unknown(&mut self, unknown: Unknown) {
+        if self.unknowns.len() < REPORT_DIAGNOSTIC_LIMIT {
+            self.unknowns.push(unknown);
+        } else {
+            self.unknowns_omitted = self.unknowns_omitted.saturating_add(1);
+            self.note_report_limit("unknowns");
+        }
+    }
+
+    fn note_report_limit(&mut self, resource: &str) {
+        if !self.report_limits.iter().any(|item| item == resource) {
+            self.report_limits.push(resource.to_owned());
+        }
     }
 }
 
@@ -416,6 +518,7 @@ mod tests {
     fn wal_report_round_trip_preserves_null_flush() {
         let mut report = WalReport::new(InputInfo {
             path: None,
+            path_encoding: None,
             file_size: 0,
             sha256: Some("ab".repeat(32)),
         });

@@ -75,6 +75,16 @@ impl Error for OutputError {
 pub fn write_report(path: &Path, input_path: &Path, contents: &str) -> Result<(), OutputError> {
     reject_path_alias(path, input_path)?;
 
+    if path.exists() {
+        let metadata = std::fs::metadata(path).map_err(|source| OutputError::Metadata {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(OutputError::InvalidPath(path.to_path_buf()));
+        }
+    }
+
     let mut output = OpenOptions::new()
         .write(true)
         .create(true)
@@ -152,31 +162,26 @@ fn same_file_identity(
     input_path: &Path,
     output_path: &Path,
 ) -> Result<bool, OutputError> {
-    let input_metadata = input.metadata().map_err(|source| OutputError::Metadata {
-        path: input_path.to_path_buf(),
-        source,
-    })?;
     let output_metadata = output.metadata().map_err(|source| OutputError::Metadata {
         path: output_path.to_path_buf(),
         source,
     })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(input_metadata.dev() == output_metadata.dev()
-            && input_metadata.ino() == output_metadata.ino())
+    if !output_metadata.is_file() {
+        return Err(OutputError::InvalidPath(output_path.to_path_buf()));
     }
-
-    #[cfg(not(unix))]
-    {
-        let _ = (input_metadata, output_metadata);
-        input_path
-            .canonicalize()
-            .and_then(|input| output_path.canonicalize().map(|output| input == output))
-            .map_err(|source| OutputError::Canonicalize {
-                path: output_path.to_path_buf(),
-                source,
-            })
-    }
+    let input_handle = input
+        .try_clone()
+        .and_then(same_file::Handle::from_file)
+        .map_err(|source| OutputError::Metadata {
+            path: input_path.to_path_buf(),
+            source,
+        })?;
+    let output_handle = output
+        .try_clone()
+        .and_then(same_file::Handle::from_file)
+        .map_err(|source| OutputError::Metadata {
+            path: output_path.to_path_buf(),
+            source,
+        })?;
+    Ok(input_handle == output_handle)
 }

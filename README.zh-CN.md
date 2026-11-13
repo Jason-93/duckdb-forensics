@@ -2,211 +2,240 @@
 
 [English](README.md) | **简体中文**
 
-一个只读、离线的 DuckDB 数据库及 WAL 崩溃现场检查器。它检查 DuckDB v2.0.0 Header、Block 几何结构与 Checksum、Meta Block 链，并在不执行 Replay 的情况下分析未加密 WAL v2 帧。它还能生成仅建议性质的恢复计划，并在临时副本上使用用户显式提供的官方 DuckDB v2.0.0 可执行文件与 Rust 分析进行对照。报告以 Text 或 JSON 输出可追溯到文件偏移的 Observation、Finding、明确区分的 Inference，以及解析覆盖率。
+`duckdb-forensics` 用于离线检查 DuckDB 数据库和 WAL 文件，适合分析崩溃或写入中断后的现场。它只读取原始文件，不通过 DuckDB 打开它们，也不执行 WAL 重放、自动修复或数据恢复。
 
-解析器使用 Rust 实现，不依赖 `duckdb-rs`、DuckDB C++ 或 `unsafe` 代码，也不会通过 DuckDB 打开证据文件。
+目前可检查 DuckDB v2.0.0 的文件头、Block 布局与校验和、Meta Block 链，以及未加密 WAL v2 的帧结构。报告提供文本和 JSON 两种格式，诊断可追溯到具体文件偏移，并区分直接观察、推断和无法确认的部分。
 
-## 支持范围
+解析器使用 Rust 编写，不依赖 `duckdb-rs`、DuckDB C++ 或 `unsafe` 代码。
 
-- 官方 DuckDB **v2.0.0** 原生单文件 `.duckdb` 数据库。
-- Storage compatibility **69**，以及 v2.0.0 Main Header 版本标记 **999**。
-- 已确认的小端、未加密、默认 8 字节 Header 布局文件。
-- Main Header Magic、原始字段和 Checksum。
-- 两个 Database Header 的原始字段及独立 Checksum。
-- 基于 iteration 的可能有效 Header 选择，以及面向损坏现场的诊断。
-- Block allocation size、block count 验证，以及使用 checked arithmetic 的文件长度几何计算。
-- 流式计算文件 SHA-256，以及规范化或隐藏的输入路径。
+## 支持范围与验证状态
 
-`verify` 子命令还支持：
+| 能力 | 状态 | 验证方式与边界 |
+|---|---|---|
+| Main Header、Database Header、文件长度与 Block 布局 | 支持 DuckDB v2.0.0 / storage compatibility 69 | 官方 fixture、公开故障样本、proptest、校验和测试 |
+| 明文 Block 校验和、`meta_block` / `free_list` 链 | 支持默认 8 字节 Block Header | 全量与按需扫描、短读、循环、越界、稀疏文件和资源限制测试 |
+| 未加密 WAL v2 的帧、Flush、Checkpoint 外层结构 | 支持 | 独立 manifest、随机字节和极端长度测试、精确 JSON 往返 |
+| `recover-plan` 恢复建议 | **实验性** | 只生成建议数据，不执行，不承诺无损恢复 |
+| 官方 DuckDB 对照检查（Oracle） | **实验性** | 模拟进程测试为必选项；真实引擎测试需显式提供 `DUCKDB_V2_0_0` |
+| 其他 DuckDB 版本、加密内容、大端或其他 Block Header 布局 | 不支持 | 报告 `unsupported` 或 `unknown`，不按已知布局猜测 |
 
-- 以流式方式校验完整明文 Block，并隔离单个 Block 的诊断。
-- 截断和越界 Block、recorded count 几何结构，以及非对齐尾部数据。
-- 有界的 `meta_block` 和 `free_list` 链遍历，包括指针边界、长度和循环检查。
-- 明确的已检查、未检查、不支持及不可用覆盖率；未访问 Block 不会被称为健康，也不会被推断分配状态。
+CI 配置会在 Linux、macOS 和 Windows 上构建并运行测试。某个平台的本机结果不能替代其余平台的 CI 结果。
 
-`wal` 子命令的支持范围更窄：
+### 明确不支持的功能
 
-- 官方 DuckDB **v2.0.0** 未加密 **WAL version 2** 的小端帧格式。
-- 无帧 BinarySerializer 版本对象，以及 `length + checksum + Payload` Entry 帧。
-- 流式 Entry Checksum、declared/actual length、结构错误偏移和零/非零尾部证据。
-- 源码定义的 WALType 封装、精确的空 WAL_FLUSH 对象，以及可可靠解码的 Checkpoint Marker。
-- 已确认 Flush 位置，以及单独定义的连续验证 `last_good_flush`。
-- 不输出业务 Payload：普通 Insert/Update/Catalog Payload 保持 `not_decoded`。
+本工具不解析 DuckDB v1.x 主文件、WAL v1/v3、加密内容、Catalog、free-list/meta-block 业务内容、Row Group 或列压缩，也不输出表数据、执行行级恢复、重放 WAL、触发 checkpoint、截断文件或生成替代数据库。DuckLake、Parquet 和 MotherDuck 同样不在支持范围内。
 
-WAL v1、加密 WAL v3 和未知 WAL 版本返回 `unsupported_wal_version`，不会强行按 v2 解析。
-
-加密数据库文件会通过 Main Header 识别。其加密 Database Header 和 Block 会标记为 `unsupported`，不会按明文计算或报告 Checksum。
-
-## 非目标
-
-这些阶段不支持 DuckDB v1.x 主文件、WAL v1/v3 帧、加密内容解码、大端文件、非默认 block-header 大小、DuckLake、Parquet、MotherDuck、Catalog 反序列化、free-list/meta-block 内容解码、Row Group、列压缩、业务数据输出、行级恢复、WAL Replay、自动修复、checkpoint、截断或生成替代数据库。恢复计划仅为建议，工具不会执行任何候选动作。
-
-检查通过不代表数据库健康，也不代表 DuckDB 一定能够打开它。有关源码依据、字节布局和未检查区域，请参阅 [FORMAT_NOTES.md](FORMAT_NOTES.md)。
+**检查通过只表示已覆盖的项目未发现问题，不代表数据库一定健康，也不代表 DuckDB 一定能打开它。** 格式依据和未覆盖范围见 [FORMAT_NOTES.md](FORMAT_NOTES.md)。
 
 ## 构建
 
-需要稳定的 Rust 工具链和 Cargo。
+需要稳定版 Rust 和 Cargo：
 
 ```sh
 cargo build --workspace
 ```
 
-CLI 二进制文件位于 `target/debug/duckdb-forensics`。
+可执行文件位于 `target/debug/duckdb-forensics`。
 
-## 执行检查
+## 命令用法
+
+### 检查数据库文件头
 
 ```sh
 duckdb-forensics inspect <DB_PATH> [--format text|json] [--output PATH] [--hide-path]
 ```
 
-示例：
-
 ```sh
-# 在标准输出中显示人类可读的报告
+# 在终端查看文本报告
 duckdb-forensics inspect evidence.duckdb
 
-# 在标准输出中显示 JSON，并隐藏规范化输入路径
+# 输出 JSON，但不记录规范化后的输入路径
 duckdb-forensics inspect evidence.duckdb --format json --hide-path
 
-# 将 Text 报告写入单独的文件
+# 将文本报告写入另一个文件
 duckdb-forensics inspect evidence.duckdb --output inspection.txt
 ```
 
-## 在不 Replay 的情况下检查 WAL
+JSON 字段约束见 [`schemas/inspection-report.schema.json`](schemas/inspection-report.schema.json)。
+
+### 检查 WAL，不重放 Entry
 
 ```sh
 duckdb-forensics wal <WAL_PATH> [--format text|json] [--output PATH]
 ```
-
-示例：
 
 ```sh
 duckdb-forensics wal evidence.duckdb.wal
 duckdb-forensics wal evidence.duckdb.wal --format json --output wal-report.json
 ```
 
-该命令只读取指定 WAL，不会通过 DuckDB 打开原始数据库、Replay Entry、写入 WAL 或截断 WAL。WAL JSON 契约见 [`schemas/wal-report.schema.json`](schemas/wal-report.schema.json)。
+该命令只读取指定 WAL，不会写入或截断它，也不会打开对应的数据库。支持 WAL v2 的版本对象、`length + checksum + Payload` 帧、WALType 外层结构、精确的 WAL_FLUSH 和 Checkpoint Marker。普通 Insert、Update、Catalog 等业务 Payload 保持 `not_decoded`。
 
-## 验证主文件
+WAL v1、加密 WAL v3 和未知版本返回 `unsupported_wal_version`，不会强行套用 v2 解析规则。JSON 字段约束见 [`schemas/wal-report.schema.json`](schemas/wal-report.schema.json)。
+
+### 校验主文件和 Meta Block 链
 
 ```sh
 duckdb-forensics verify <DB_PATH> [--blocks] [--format text|json] [--duckdb PATH]
 ```
 
-默认验证 Header、所选 Header 的几何结构，以及所选 `meta_block`/`free_list` 链，包括这些链访问的 Block Checksum。`--blocks` 额外流式校验所有完整物理 Block。单个 Block 损坏不会阻止后续独立检查。`block_count` 后的额外 Block 单独报告，因为 DuckDB 可能将其视为隐式 free list；未访问 Block 不会被推断分配状态。重复引用不会自动判为损坏，循环检测按每条链独立进行。
+默认检查文件头、所选 Database Header 描述的文件布局，以及它引用的 `meta_block` 和 `free_list` 链。链访问到的 Block 也会校验 checksum。加上 `--blocks` 后，还会逐个校验文件中的所有完整物理 Block。
 
-报告区分截断 Block、越界引用、尾部字节、不支持的加密区域和不可用覆盖率。`complete` 状态或 Checksum 有效不代表 DuckDB 一定能打开数据库，也不代表 Catalog/业务内容健康。JSON 契约见 [`schemas/verify-report.schema.json`](schemas/verify-report.schema.json)。
+单个 Block 损坏不会中止其他独立检查。`block_count` 之后的完整 Block 单独列出，因为 DuckDB 可能把它们视为隐式 free list；未被访问的 Block 不会被判为健康或空闲。每条链独立检测循环，跨链共享节点不直接视为损坏。
 
-## 生成仅建议性质的恢复计划
+`complete` 只表示本次检查已完成，不是数据库健康证明。JSON 字段约束见 [`schemas/verify-report.schema.json`](schemas/verify-report.schema.json)。
+
+### 生成恢复建议
 
 ```sh
 duckdb-forensics recover-plan <EVIDENCE_DIR> [--format text|json] [--duckdb PATH]
 ```
 
-命令递归清点并哈希所有 regular file，分析唯一且无歧义的顶层 `.duckdb` 及精确同名 `.wal`，随后再次核对原文件集合与哈希。它绝不执行恢复。JSON 始终分为 `observed_facts`、`findings`、`inferences`、`unknowns`、`candidate_actions` 和 `risks`，契约见 [`schemas/recovery-plan.schema.json`](schemas/recovery-plan.schema.json)。
+命令先递归清点并哈希目录中的普通文件，再分析顶层唯一的 `.duckdb` 及其同名 `.wal`，最后重新核对文件集合和哈希。缺少数据库、存在多个候选数据库、清单不完整或文件在分析期间发生变化时，都不会给出恢复动作。
 
-当连续验证的 `last_good_flush` 在 EOF 之前结束时，`candidate_wal_truncation` 建议记录目标偏移、WAL 哈希、Flush 证据，以及可能丢失区间 `[target_offset, wal_file_size)`。该区间可能包含完整但没有后续 Flush 的 Entry，因此事务和行级损失未知。动作必须在副本上执行并全面重新验证。没有边界、边界已在 EOF、分析受资源限制、文件缺失或数据库歧义时均不生成此动作。工具不会截断、删除、改名或覆盖证据，也不会宣称无损恢复。
+如果连续可信前缀中的 `last_good_flush` 位于 EOF 之前，报告可能包含 `candidate_wal_truncation` 建议，记录目标偏移、WAL 哈希、Flush 依据和可能丢失的区间 `[target_offset, wal_file_size)`。该区间可能含有完整但尚未 Flush 的 Entry，因此无法据此确定事务或行级损失。任何人工操作都必须在副本上进行，并重新校验结果。
 
-## 可选官方 DuckDB Oracle
+工具本身不会执行截断、删除、改名或覆盖。JSON 字段约束见 [`schemas/recovery-plan.schema.json`](schemas/recovery-plan.schema.json)。
 
-两个新命令均接受 `--duckdb PATH`，仅用于用户显式提供的官方 DuckDB v2.0.0 可执行文件，不会自动发现或下载。工具先在 `:memory:` 中执行 `SELECT version()`，再把数据库及关联 WAL 复制到临时工作目录，通过受控初始化禁用 known-extension 自动安装/加载，之后才对副本执行 `ATTACH ... (READ_ONLY)` 和最小只读查询。原证据路径不会传给 DuckDB。
+## 官方 DuckDB 对照检查（实验性）
 
-每次调用记录完整 argv、退出状态、stderr/stdout（每流最多保留 64 KiB 并标记截断）以及默认 30 秒超时。超时进程会被终止并回收。对照结果分为 `agreement`、`disagreement` 或 `not_comparable` 并附原因。Oracle 成功不会推翻 Checksum Finding，也不证明未访问内容健康；无法解释的 Rust/Oracle 差异会报告为 `disagreement`，不会隐藏。
+`verify` 和 `recover-plan` 都接受 `--duckdb PATH`，但只使用用户明确提供的官方 DuckDB v2.0.0 可执行文件，不会自动搜索或下载。
 
-检查完成时退出码为 0，即使报告包含损坏或不支持特性的 Finding。参数用法、输入 I/O、序列化和输出安全检查失败时退出码为 2。
+执行流程如下：
 
-## 报告模型
+1. 在 `:memory:` 中运行 `SELECT version()`，确认版本严格为 v2.0.0。
+2. 将数据库及关联 WAL 复制到临时工作目录。
+3. 通过初始化配置禁用 known-extension 的自动安装和加载。
+4. 仅对副本执行 `ATTACH ... (READ_ONLY)` 和最小只读查询。原始文件路径不会传给 DuckDB。
 
-JSON 使用 schema version `1`，包含：
+每次调用记录参数、退出状态、stdout/stderr、超时和截断状态。每个输出流最多保留 64 KiB；非法 UTF-8 会记录有效性标志和原始 hex。默认超时为 30 秒，超时进程会被终止并回收。
 
-- `input`：可选的规范化路径、文件大小和流式 SHA-256（不可用时为 `null`）；
-- `observations`：直接观察到的事实，包含 `name`、`structure_path` 和可选的 `file_offset`；
-- `findings`：稳定的错误代码、severity、message、location、evidence、remediation hint 和 confidence；
-- `inferences`：独立表示、带置信度的推断，例如可能有效的 Header、可能过期的 Header 或可能的撕裂写入；
-- `checks_passed`、`checks_failed` 和 `checks_skipped`；
-- `coverage`：已检查及明确未检查的区域；
-- `unknowns`：在当前证据或支持范围内无法确认的事实。
+对照结果分为 `agreement`、`disagreement` 和 `not_comparable`。DuckDB 能打开副本不代表所有 Block 都健康，也不能推翻已发现的 checksum 问题。临时目录和外部进程输出可能随运行变化，做 JSON 逐字节比较时需要考虑这一点。
 
-`--hide-path` 会将 `input.path` 设置为 `null`，但不会隐藏文件大小、哈希、偏移或诊断信息。报告只包含 Header 元数据，不包含表数据行。
+## 报告格式与诊断分类
 
-WAL JSON 独立使用 schema version `1`，报告版本/加密状态、版本头长度、文件大小和 SHA-256、逐 Entry 偏移和长度、Checksum 状态和类型、汇总数量、首个无法解析和 Checksum 失败位置、扫描覆盖率、unknowns、尾部零证据、已确认 Flush、`last_good_flush`、该边界后的数据，以及可选 Checkpoint Marker。`actual_length` 表示实际存在且不超过 `declared_length` 的 Payload 字节数。
+四类报告都使用 schema version `1`。当前版本始终输出新增字段；读取旧报告时，这些新增字段可以缺省，`status` 等核心字段仍然必填。
 
-`last_good_flush` 要求从文件开头到精确 WAL_FLUSH 的 Entry 连续完整、Checksum 有效且类型封装可信。它不一定是应用已经收到的最后成功提交，也不是安全恢复点。`confirmed_flushes` 还可能包含早期错误之后物理上有效的 Flush 对象，但它们不能恢复连续性。Checksum mismatch 本身不能证明 torn write，尾部零填充也只能作为证据。
+- `input`：输入路径及其编码、文件大小、SHA-256。无法取得哈希时使用 `null`。
+- `observations`：直接观察到的值，包含 `name`、`structure_path` 和可选的 `file_offset`。
+- `findings`：问题代码、分类、严重程度、位置、证据、处理建议和置信度。
+- `inferences`：与直接观察分开的推断，例如可能有效的 Header、可能过期的 Header 或可能的撕裂写入。
+- `checks_passed`、`checks_failed`、`checks_skipped`：各项检查的结果。
+- `coverage`：已检查和未检查的范围。
+- `unknowns`：受证据、格式支持或资源预算限制而无法确认的内容。
 
-Verify JSON 独立使用 schema version `1`，增加所选 Header、数量有界的 Block 异常、Meta 链终止/容量/循环状态、尾部分类和明确的完整性覆盖率。Recovery-plan JSON 同样独立使用 schema version `1`；候选动作只是数据对象，不是可执行指令。
+`findings[].category` 的含义如下：
 
-稳定主文件 Finding 代码包括 `invalid_magic`、`checksum_mismatch`、`truncated_file`、`unsupported_storage_version`、`unsupported_encryption`、`invalid_block_alloc_size`、`invalid_block_count`、`invalid_metadata_pointer`、`invalid_block_reference`、`geometry_overflow`、`no_valid_database_header` 和 `limit_reached`。
+| 分类 | 含义 |
+|---|---|
+| `corruption` | 发现明确的结构或完整性违例；不代表已经确定物理原因 |
+| `unsupported` | 文件使用的版本或功能不在支持范围内 |
+| `limit` | 达到资源或报告保留上限；剩余范围未检查，不能据此判断损坏 |
+| `unknown` | 当前证据不足，或结果无法与现有检查直接对应 |
+| `informational` | 空 WAL、额外 Block、零填充尾部等观察信息 |
 
-WAL Finding 代码为 `empty_wal`、`unsupported_wal_version`、`invalid_wal_header`、`invalid_entry_length`、`entry_exceeds_remaining_file`、`checksum_mismatch`、`truncated_entry`、`zero_filled_tail`、`unparsed_trailing_data` 和 `resource_limit_reached`。声明长度超过 EOF 时，可以同时具有越界和截断两种分类。
+I/O、JSON 序列化和输出安全错误属于运行错误，退出码为 2。分析完成时退出码为 0，即使报告中包含 corruption 或 unsupported。
 
-新增 Verify Finding 包括 `truncated_block`、`block_out_of_bounds`、`trailing_data`、`beyond_header_block_count` 和 `meta_block_cycle`。恢复/Oracle Finding 包括 `evidence_incomplete`、`evidence_changed_during_analysis` 和 `oracle_disagreement`。
+### 文本、路径与数字
+
+- 文件头中的非法 UTF-8 不会被替换后冒充正常文本：文本字段为 `null`，并保留原始 hex 和 UTF-8 有效性标志。
+- 非 Unicode 路径使用明确、可逆的编码，不做静默替换。
+- JSON 整数覆盖完整 `u64` 范围。读取方必须使用 64 位整数；JavaScript 默认 Number 在 2^53 以上会丢精度。
+- 百分比使用精确 JSON 浮点往返测试，避免序列化后再读取时出现最低位差异。
+- `--hide-path` 只隐藏 `input.path`，不影响文件大小、哈希、偏移或诊断。
+
+### WAL 特有字段
+
+`actual_length` 是文件中实际存在、且不超过 `declared_length` 的 Payload 字节数。`last_good_flush` 只接受从版本对象开始、连续完整且 checksum 和类型检查均通过的前缀，并要求前缀以精确的 WAL_FLUSH 结束。它不一定是应用已确认的最后提交，也不自动构成安全截断点。
+
+早期 Entry 出错后，仍可能观察到后续物理上有效的 Flush，但这些 Flush 不会恢复前缀连续性。checksum 不匹配不能单独证明撕裂写入，零填充尾部也只是现场证据。
 
 ## 只读与输出安全
 
-- `DB_PATH`、`WAL_PATH` 和 `EVIDENCE_DIR` 输入始终以只读方式打开。未指定 `--duckdb` 时，工具不会调用 DuckDB、创建 WAL、触发 checkpoint、Replay WAL 或修改任何输入。
-- Oracle 的写入仅限于临时副本工作目录；`recover-plan` 分析后会再次哈希原证据。
-- 对 `inspect` 和 `wal`，唯一可选写入是通过 `--output` 指定报告文件；`verify` 和 `recover-plan` 只向 stdout 输出报告。
-- 如果输出路径解析后与输入文件相同，操作会被拒绝。符号链接解析以及 Unix device/inode 检查也会防止通过现有别名或硬链接覆盖输入；截断输出前还会再次检查已打开文件的身份。
-- Remediation 文本仅为建议，绝不会自动执行。
-- 损坏、空、随机、截断、不支持或可能触发溢出的输入会产生结构化诊断，而不会导致解析器 Panic。
+- 所有输入都以只读方式打开；设备、FIFO、目录等非普通输入会被拒绝。
+- 未指定 `--duckdb` 时，不调用 DuckDB，不创建 WAL，不触发 checkpoint，也不修改输入。
+- `inspect` 和 `wal` 只能通过 `--output` 写报告；`verify` 和 `recover-plan` 只写 stdout。
+- 输出路径指向输入本身、其符号链接或硬链接时会被拒绝。实现同时检查已打开文件的身份，覆盖 Unix 和 Windows；截断输出前还会再检查一次。
+- Oracle 的写入限制在临时副本目录。`recover-plan` 最后会重新核对原文件集合和哈希。
+- 报告中的修复建议只是文本，工具不会执行。
 
-请始终保留原始证据，并在副本上执行任何单独的数据库操作。
+### 威胁模型与免责声明
+
+文件字节、声明长度、指针、目录深度和文本编码都按不可信输入处理。资源预算用于限制意外资源消耗，但不是 wall-clock 或内存沙箱；预算内的稀疏文件仍需线性 I/O 才能计算哈希。
+
+文件在分析期间被外部进程修改时，工具只能尽力发现，不能抵御恶意本地进程。用户提供的 Oracle 可执行文件必须可信；副本隔离不等于原生代码沙箱。
+
+任何报告都不保证数据库健康、提交持久性、完整损坏检测、可恢复性或无损恢复。请保留原始文件，并始终在副本上进行后续数据库操作。
 
 ## 资源限制
 
-检查器最多读取三个固定 4096 字节 Header 页，并通过 1 MiB 缓冲区流式计算 SHA-256。它不会将整个数据库载入内存，也不会根据文件提供的长度分配内存。
+| 项目 | 默认限制与行为 |
+|---|---|
+| 主文件大小 | 1 TiB；超限在哈希和解析前停止，SHA-256 保持 `null` |
+| Header 读取 | 最多三个固定 4096 字节页面 |
+| 哈希与 WAL 分块读取 | 固定 1 MiB 缓冲区，不按声明长度分配内存 |
+| WAL Entry 候选数 | 1,000,000 |
+| 单个 WAL Payload | 256 MiB |
+| WAL 报告保留量 | Entry 和已确认 Flush 各 10,000；Finding 和 Unknown 各 1,000 |
+| Meta Block 链 | 每条链最多 1,000,000 个节点，使用独立 visited 集 |
+| Block 缓冲区与异常 | 16–256 KiB 缓冲区；最多保留 1,000 条异常 |
+| Recovery 清单 | 最多 100,000 个目录项、64 层目录、1 TiB 总哈希字节，迭代遍历并在超限时停止 |
+| Oracle | 默认 30 秒超时，每个输出流最多保留 64 KiB |
 
-默认主文件大小预算为 1 TiB。更大的输入会在哈希和 Header 解析前停止，并报告 `limit_reached`；SHA-256 和未检查字段保持 unknown。资源限制不会报告为 corruption。
+WAL 的扫描总数、报告保留数、省略数和 `report_limits` 分开记录。未保留的 Entry 不会被当成不存在或健康。达到资源限制会产生 `limit` 诊断，并保留停止偏移和未覆盖范围，不会被归为 corruption。
 
-WAL 默认预算为每文件 1 TiB、最多 1,000,000 个 Entry 候选、每 Entry 声明 Payload 最大 256 MiB。Payload Checksum 和尾部读取使用固定 1 MiB 分块，绝不会根据未检查的 Entry 声明长度分配内存。达到 WAL 预算时报告 `resource_limit_reached` 并保留停止偏移；初始文件预算阻止处理时，SHA-256 为 `null`。
+## 测试、故障样本与 CI
 
-Verify 使用有界的 16–256 KiB Block 缓冲区，每条 Meta 链最多遍历 1,000,000 个节点，最多保留 1,000 条 Block 异常。正常 Block 仅计数，不累计到报告中。Recovery 最多清点 100,000 个 regular file，并以流式方式计算全部哈希。Oracle 默认超时 30 秒，每流最多保留 64 KiB 输出。资源或报告限制会保留省略计数或未知覆盖率，不视为损坏结论。
-
-## 可重复的 Fixture 生成
-
-仓库只提交一个小型官方 v2.0.0 数据库 fixture（536,576 字节），其中包含两行测试数据。损坏变体在测试期间于临时目录生成，不会提交到仓库。
-
-重新生成：
-
-```sh
-python3 scripts/generate_fixture.py
-```
-
-生成器会下载当前平台对应的官方 v2.0.0 CLI Release 归档，验证其固定 SHA-256 和 `SELECT version()`，然后写入 `normal.duckdb` 以及独立的来源与预期值清单。也可以使用已有的官方二进制文件：
-
-```sh
-python3 scripts/generate_fixture.py --duckdb /path/to/duckdb-v2.0.0
-```
-
-DuckDB 会生成随机数据库标识符，因此重新生成的数据库结构等价，但不要求逐字节一致。清单记录每次生成的 fixture 哈希和原始 Header 值。
-
-单独生成确定性的 WAL fixtures：
-
-```sh
-python3 scripts/generate_wal_fixtures.py
-```
-
-这个只使用 Python 标准库的生成器不会调用 DuckDB 或 Rust 解析器。它生成 `normal.wal`、独立的逐 Entry 期望清单，以及 Issue #19099 历史语料：一个文件在固定 Entry 内位置截断，另一个从相同位置零填充到原始 EOF。该语料不断言当前 DuckDB 仍存在历史 Bug。
-
-运行测试不需要网络或 DuckDB。只有显式设置 `DUCKDB_V2_0_0=/path/to/duckdb` 时才会额外运行真实 Oracle 测试；模拟 Oracle 测试无需 DuckDB 即可覆盖失败、超时、输出限制和副本隔离。
-
-## 测试与静态检查
+常规检查命令：
 
 ```sh
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-主文件测试覆盖官方正常 fixture、空文件、非 DuckDB 文件、随机文件、Main Header 位翻转、任一或两个 Database Header 损坏、截断、非法 block allocation size、巨大 block count、不支持的加密和版本、稳定的 JSON 反序列化、Text 输出、隐藏路径、输出文件，以及直接路径或硬链接覆盖尝试。CLI 测试辅助函数会验证输入 SHA-256 保持不变，并确认没有生成 WAL。
+测试不需要网络或 DuckDB；公开故障样本的集成测试需要 Python 3。模拟 Oracle 测试覆盖失败、超时、输出限制、非法 UTF-8 和副本隔离。设置 `DUCKDB_V2_0_0=/path/to/duckdb` 后，才会额外运行真实 v2.0.0 引擎测试。
 
-WAL 测试覆盖正常/空/不支持文件、越界和超大长度、Entry 中间和固定帧头截断、Checksum 位翻转、零/非零尾部、随机字节、未知类型、损坏 Flush、Checkpoint 解码、资源限制、JSON Schema/Text/输出文件，以及历史同位置截断/零填充对照。独立清单复核偏移和长度；测试断言所有异常输入无 Panic、输入 SHA-256 不变，并在不存在连续验证 Flush 时严格要求 `last_good_flush=null`。
+### 属性测试与最小复现
 
-Verify 测试覆盖全量/默认扫描、独立 Block 损坏、截断、额外数据、Meta 循环/边界/Checksum 失败、合法共享 Block、加密和资源限制。Recovery 与 Oracle 测试检查六段报告、候选丢失区间、缺失/歧义证据、版本不符、disagreement、输出截断、超时和只读副本执行。端到端辅助函数比较执行前后所有原证据文件的 SHA-256 和完整文件集合，包括故意修改临时副本的 Oracle。
+proptest 覆盖任意字节、短输入、极端长度和偏移、Meta Block 损坏、JSON 往返以及输入只读性。测试不仅要求“不 Panic”，还检查实际偏移不越过 EOF、计数一致、百分比有限、Flush 不得伪造等不变量。
+
+单独重跑一个属性：
+
+```sh
+cargo test -p duckdb-forensics --test parser_properties extreme_wal_lengths_never_panic -- --exact
+```
+
+失败时保留自动缩小的输入和 `*.proptest-regressions` 文件。诊断后应加入确定性回归或公开故障样本，不得删除、忽略或放宽无法解释的断言。
+
+### 公开故障样本
+
+```sh
+python3 scripts/generate_fault_corpus.py --output target/fault-corpus
+
+# 可选：额外生成 2 TiB 稀疏资源限制案例
+python3 scripts/generate_fault_corpus.py --output target/fault-corpus-sparse --include-sparse
+```
+
+`corpus/manifest.json` 记录独立计算的源/输出哈希、字节 patch、预期分类和偏移。默认生成 15 个小型案例；稀疏案例只在显式指定 `--include-sparse` 时生成。输出目录与原始文件分离，不会覆盖证据。
+
+正常 fixture 和 WAL 样本可分别重建：
+
+```sh
+python3 scripts/generate_fixture.py
+python3 scripts/generate_wal_fixtures.py
+```
+
+已有官方 v2.0.0 可执行文件时，可运行 `python3 scripts/generate_fixture.py --duckdb /path/to/duckdb-v2.0.0`。数据库 fixture 包含随机标识符，因此重建后结构等价，但不要求逐字节一致；WAL 生成器只使用 Python 标准库，输出是确定性的。
+
+### 持续集成
+
+CI 在 Linux 上执行格式检查、clippy、全部测试、Corpus 可重复性检查和构建，并在 Linux、macOS、Windows 矩阵上分别构建和测试。真实 DuckDB 下载不是 CI 的必需步骤。
 
 ## Workspace 结构
 
-- `crates/duckdb-format`：固定页读取、标量解析、DuckDB Checksum、checked Block/Meta 几何、WAL v2 帧/封装解析和格式错误。
-- `crates/duckdb-report`：Observation/Finding/Inference 模型、主文件、Verify、Recovery、Oracle 和 WAL JSON 类型及 Text 渲染。
-- `crates/duckdb-forensics`：只读分析流程、建议性恢复计划、隔离 Oracle 执行、CLI、流式哈希/Checksum 和资源限制。
-- `schemas/wal-report.schema.json`、`schemas/verify-report.schema.json` 和 `schemas/recovery-plan.schema.json`：独立的 JSON Schema version 1 契约。
+- `crates/duckdb-format`：固定页与标量解析、DuckDB checksum、checked Block/Meta 布局计算、WAL v2 帧和外层结构。
+- `crates/duckdb-report`：报告类型、诊断分类、JSON 序列化和文本渲染。
+- `crates/duckdb-forensics`：只读分析流程、恢复建议、Oracle 隔离执行、CLI、流式读取和资源限制。
+- `schemas/`：`inspect`、WAL、Verify、Recovery 四份 JSON Schema，以及共享定义 `report-common.schema.json`。
+- `corpus/`：公开故障样本的独立 patch 与预期结果。

@@ -4,7 +4,6 @@ pub mod wal;
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 
 pub const FILE_HEADER_SIZE: u64 = 4096;
@@ -108,7 +107,10 @@ impl HeaderPage {
     }
 }
 
-pub fn read_header_page(file: &mut File, offset: u64) -> Result<HeaderPage, FormatError> {
+pub fn read_header_page<R: Read + Seek>(
+    file: &mut R,
+    offset: u64,
+) -> Result<HeaderPage, FormatError> {
     file.seek(SeekFrom::Start(offset))
         .map_err(|source| FormatError::Io {
             operation: "seek",
@@ -545,5 +547,39 @@ mod tests {
             checked_block_location(MAXIMUM_BLOCK, 262_144),
             Err(GeometryError::ByteLengthOverflow)
         );
+    }
+
+    struct ShortReads {
+        cursor: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for ShortReads {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(3);
+            self.cursor.read(&mut buffer[..limit])
+        }
+    }
+
+    impl Seek for ShortReads {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn header_reads_join_short_reads_and_report_real_eof() {
+        let mut reader = ShortReads {
+            cursor: std::io::Cursor::new(vec![7; FILE_HEADER_SIZE as usize]),
+        };
+        let page = read_header_page(&mut reader, 0).expect("complete page");
+        assert!(page.is_complete());
+        assert_eq!(page.available, FILE_HEADER_SIZE as usize);
+
+        let mut reader = ShortReads {
+            cursor: std::io::Cursor::new(vec![7; 17]),
+        };
+        let page = read_header_page(&mut reader, 0).expect("partial page");
+        assert_eq!(page.available, 17);
+        assert!(!page.is_complete());
     }
 }

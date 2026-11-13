@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/duckdb-forensics/inspection-report.schema.json",
+  "title": "duckdb-forensics main-file inspection report",
+  "description": "Read-only header and geometry observations; not a database-health or recoverability verdict.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool_version", "input", "observations", "findings", "inferences", "checks_passed", "checks_failed", "checks_skipped", "coverage", "unknowns"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "tool_version": { "type": "string" },
+    "input": { "$ref": "report-common.schema.json#/$defs/input" },
+    "observations": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/observation" } },
+    "findings": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/finding" } },
+    "inferences": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/inference" } },
+    "checks_passed": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/check" } },
+    "checks_failed": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/check" } },
+    "checks_skipped": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/skippedCheck" } },
+    "coverage": { "$ref": "report-common.schema.json#/$defs/coverage" },
+    "unknowns": { "type": "array", "items": { "$ref": "report-common.schema.json#/$defs/unknown" } }
+  }
+}

@@ -19,6 +19,8 @@ use duckdb_report::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::util::{open_regular_file, path_text};
+
 #[cfg(test)]
 use duckdb_format::duckdb_checksum;
 
@@ -27,12 +29,14 @@ const PAYLOAD_PREFIX_LIMIT: usize = 4096;
 const DEFAULT_MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_ENTRIES: u64 = 1_000_000;
 const DEFAULT_MAX_ENTRY_SIZE: u64 = 256 * 1024 * 1024;
+const DEFAULT_MAX_REPORT_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WalInspectionLimits {
     pub max_file_size: u64,
     pub max_entries: u64,
     pub max_entry_size: u64,
+    pub max_report_entries: usize,
 }
 
 impl Default for WalInspectionLimits {
@@ -41,6 +45,7 @@ impl Default for WalInspectionLimits {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             max_entries: DEFAULT_MAX_ENTRIES,
             max_entry_size: DEFAULT_MAX_ENTRY_SIZE,
+            max_report_entries: DEFAULT_MAX_REPORT_ENTRIES,
         }
     }
 }
@@ -129,19 +134,16 @@ pub fn inspect_wal_path_with_limits(
             path: path.to_path_buf(),
             source,
         })?;
-    let mut file = File::open(&canonical_path).map_err(|source| WalInspectError::Open {
-        path: canonical_path.clone(),
-        source,
-    })?;
-    let metadata = file
-        .metadata()
-        .map_err(|source| WalInspectError::Metadata {
+    let (mut file, metadata) =
+        open_regular_file(&canonical_path).map_err(|source| WalInspectError::Open {
             path: canonical_path.clone(),
             source,
         })?;
     let file_size = metadata.len();
+    let (path, encoding) = path_text(&canonical_path);
     let mut report = WalReport::new(InputInfo {
-        path: Some(canonical_path.display().to_string()),
+        path: Some(path),
+        path_encoding: Some(encoding.to_owned()),
         file_size,
         sha256: None,
     });
@@ -150,7 +152,7 @@ pub fn inspect_wal_path_with_limits(
         report.status = WalStatus::ResourceLimitReached;
         report.first_unparsed_offset = Some(0);
         resource_finding(&mut report, "file_size", file_size, limits.max_file_size, 0);
-        report.unknowns.push(Unknown {
+        report.retain_unknown(Unknown {
             code: "resource_limited_wal".to_owned(),
             structure_path: "input".to_owned(),
             reason: "SHA-256, version, frames, tail, and Flush boundaries were not examined."
@@ -163,7 +165,7 @@ pub fn inspect_wal_path_with_limits(
     report.input.sha256 = Some(stream_sha256(&mut file)?);
     if file_size == 0 {
         report.status = WalStatus::Empty;
-        report.findings.push(finding(
+        report.retain_finding(finding(
             "empty_wal",
             Severity::Info,
             "The WAL file is empty.",
@@ -186,7 +188,7 @@ pub fn inspect_wal_path_with_limits(
             report.status = WalStatus::Invalid;
             report.first_unparsed_offset = Some(0);
             report.scan_stop_offset = 0;
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "invalid_wal_header",
                 Severity::Error,
                 "The file does not contain a supported BinaryDeserializer WAL version object.",
@@ -222,7 +224,7 @@ pub fn inspect_wal_path_with_limits(
             WAL_VERSION_ENCRYPTED => "wal_v3_encrypted",
             _ => "unknown_wal_version",
         };
-        report.findings.push(finding(
+        report.retain_finding(finding(
             "unsupported_wal_version",
             Severity::Warning,
             "Only unencrypted WAL version 2 is supported; no v2 frame parsing was attempted.",
@@ -235,7 +237,7 @@ pub fn inspect_wal_path_with_limits(
             "Use an inspector for the declared WAL version and encryption format; do not force v2 parsing.",
             Confidence::High,
         ));
-        report.unknowns.push(Unknown {
+        report.retain_unknown(Unknown {
             code: "unsupported_frames".to_owned(),
             structure_path: "wal.entries".to_owned(),
             reason: "Frames after an unsupported version header were not interpreted.".to_owned(),
@@ -255,11 +257,11 @@ fn scan_v2_entries(
 ) -> Result<WalReport, WalInspectError> {
     let file_size = report.input.file_size;
     let mut position = start;
+    let mut index = 0_u64;
     let mut trusted_prefix = true;
     report.status = WalStatus::Complete;
 
     while position < file_size {
-        let index = report.entries.len() as u64;
         if index >= limits.max_entries {
             report.status = WalStatus::ResourceLimitReached;
             report.first_unparsed_offset.get_or_insert(position);
@@ -281,25 +283,28 @@ fn scan_v2_entries(
             report.first_unparsed_offset.get_or_insert(position);
             report.scan_stop_offset = position;
             report.summary.truncated_entries += 1;
-            report.entries.push(WalEntryReport {
-                index,
-                offset: position,
-                payload_offset: None,
-                declared_length: None,
-                actual_length: 0,
-                actual_frame_length: remaining,
-                declared_frame_end: None,
-                actual_frame_end: file_size,
-                stored_checksum: None,
-                computed_checksum: None,
-                checksum_status: WalChecksumStatus::Unavailable,
-                entry_type: "unknown".to_owned(),
-                raw_entry_type: None,
-                entry_type_reason: Some("truncated_frame_header".to_owned()),
-                payload_status: WalPayloadStatus::Unavailable,
-                parse_status: WalEntryParseStatus::TruncatedEntry,
-            });
-            report.findings.push(finding(
+            report.retain_entry(
+                WalEntryReport {
+                    index,
+                    offset: position,
+                    payload_offset: None,
+                    declared_length: None,
+                    actual_length: 0,
+                    actual_frame_length: remaining,
+                    declared_frame_end: None,
+                    actual_frame_end: file_size,
+                    stored_checksum: None,
+                    computed_checksum: None,
+                    checksum_status: WalChecksumStatus::Unavailable,
+                    entry_type: "unknown".to_owned(),
+                    raw_entry_type: None,
+                    entry_type_reason: Some("truncated_frame_header".to_owned()),
+                    payload_status: WalPayloadStatus::Unavailable,
+                    parse_status: WalEntryParseStatus::TruncatedEntry,
+                },
+                limits.max_report_entries,
+            );
+            report.retain_finding(finding(
                 "truncated_entry",
                 Severity::Error,
                 "The file ends inside the fixed 16-byte WAL frame header.",
@@ -350,8 +355,8 @@ fn scan_v2_entries(
             if declared_end.is_none() {
                 report.summary.out_of_bounds_entries += 1;
             }
-            report.entries.push(entry);
-            report.findings.push(finding(
+            report.retain_entry(entry, limits.max_report_entries);
+            report.retain_finding(finding(
                 "invalid_entry_length",
                 Severity::Error,
                 "The WAL Entry has a zero length or its declared end offset overflows.",
@@ -375,9 +380,9 @@ fn scan_v2_entries(
             report.summary.truncated_entries += 1;
             entry.parse_status = WalEntryParseStatus::EntryExceedsRemainingFile;
             entry.entry_type_reason = Some("entry_exceeds_remaining_file".to_owned());
-            report.entries.push(entry);
+            report.retain_entry(entry, limits.max_report_entries);
             let location = format!("wal.entries[{index}]");
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "entry_exceeds_remaining_file",
                 Severity::Error,
                 "The declared Payload length exceeds the bytes remaining in the file.",
@@ -391,7 +396,7 @@ fn scan_v2_entries(
                 "Do not read beyond EOF or infer another frame boundary from this declaration.",
                 Confidence::High,
             ));
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "truncated_entry",
                 Severity::Error,
                 "The file ends inside this Entry's declared Payload.",
@@ -412,7 +417,7 @@ fn scan_v2_entries(
             report.scan_stop_offset = position;
             entry.parse_status = WalEntryParseStatus::ResourceLimitReached;
             entry.entry_type_reason = Some("resource_limit_reached".to_owned());
-            report.entries.push(entry);
+            report.retain_entry(entry, limits.max_report_entries);
             resource_finding(
                 &mut report,
                 "entry_size",
@@ -427,7 +432,7 @@ fn scan_v2_entries(
         report.coverage.complete_frame_bytes = report
             .coverage
             .complete_frame_bytes
-            .saturating_add(WAL_FRAME_HEADER_SIZE + frame.declared_length);
+            .saturating_add(declared_end.saturating_sub(position));
         let (computed_checksum, payload_prefix) = checksum_payload(
             file,
             payload_offset,
@@ -446,7 +451,7 @@ fn scan_v2_entries(
             entry.checksum_status = WalChecksumStatus::Mismatch;
             entry.parse_status = WalEntryParseStatus::ChecksumMismatch;
             entry.entry_type_reason = Some("checksum_mismatch".to_owned());
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "checksum_mismatch",
                 Severity::Error,
                 "The stored WAL Entry checksum differs from the checksum computed over its complete Payload.",
@@ -470,7 +475,7 @@ fn scan_v2_entries(
                     trusted_prefix = false;
                     entry.entry_type_reason = Some("invalid_wal_type_envelope".to_owned());
                     entry.payload_status = WalPayloadStatus::Invalid;
-                    report.unknowns.push(Unknown {
+                    report.retain_unknown(Unknown {
                         code: "unknown_entry_type".to_owned(),
                         structure_path: format!("wal.entries[{index}]"),
                         reason: format!("Cannot decode field 100 and its LEB128 WALType: {error}"),
@@ -485,7 +490,9 @@ fn scan_v2_entries(
                         trusted_prefix = false;
                         entry.entry_type_reason = Some("unrecognized_wal_type".to_owned());
                         entry.payload_status = WalPayloadStatus::NotDecoded;
-                        report.unknowns.push(Unknown {
+                        report.summary.not_decoded_entries =
+                            report.summary.not_decoded_entries.saturating_add(1);
+                        report.retain_unknown(Unknown {
                             code: "unknown_entry_type".to_owned(),
                             structure_path: format!("wal.entries[{index}]"),
                             reason: format!(
@@ -493,9 +500,10 @@ fn scan_v2_entries(
                                 parsed_type.raw_type
                             ),
                         });
-                        report.entries.push(entry);
+                        report.retain_entry(entry, limits.max_report_entries);
                         position = declared_end;
                         report.scan_stop_offset = position;
+                        index = index.saturating_add(1);
                         continue;
                     };
                     entry.entry_type = entry_type.as_str().to_owned();
@@ -511,7 +519,7 @@ fn scan_v2_entries(
                                     entry_offset: position,
                                     end_offset: declared_end,
                                 };
-                                report.confirmed_flushes.push(flush);
+                                report.retain_flush(flush, limits.max_report_entries);
                                 if trusted_prefix {
                                     report.last_good_flush = Some(flush);
                                 }
@@ -545,7 +553,10 @@ fn scan_v2_entries(
                                     Some("invalid_checkpoint_envelope".to_owned());
                             }
                         }
-                        _ => {}
+                        _ => {
+                            report.summary.not_decoded_entries =
+                                report.summary.not_decoded_entries.saturating_add(1);
+                        }
                     }
                     if special_valid {
                         report.summary.successfully_parsed_entries += 1;
@@ -553,7 +564,7 @@ fn scan_v2_entries(
                         report.status = WalStatus::Incomplete;
                         report.first_unparsed_offset.get_or_insert(position);
                         trusted_prefix = false;
-                        report.unknowns.push(Unknown {
+                        report.retain_unknown(Unknown {
                             code: "invalid_special_entry".to_owned(),
                             structure_path: format!("wal.entries[{index}]"),
                             reason: "The WAL_FLUSH or Checkpoint object does not match the v2.0.0 serialization.".to_owned(),
@@ -563,13 +574,14 @@ fn scan_v2_entries(
             }
         }
 
-        report.entries.push(entry);
+        report.retain_entry(entry, limits.max_report_entries);
         position = declared_end;
         report.scan_stop_offset = position;
+        index = index.saturating_add(1);
     }
 
     if report.last_good_flush.is_none() {
-        report.unknowns.push(Unknown {
+        report.retain_unknown(Unknown {
             code: "last_good_flush".to_owned(),
             structure_path: "wal.last_good_flush".to_owned(),
             reason: "No WAL_FLUSH is confirmed at the end of a continuously verified Entry prefix."
@@ -584,13 +596,9 @@ fn finish_with_tail(
     file: &mut File,
     analyze_tail: bool,
 ) -> Result<WalReport, WalInspectError> {
-    let not_decoded = report
-        .entries
-        .iter()
-        .filter(|entry| entry.payload_status == WalPayloadStatus::NotDecoded)
-        .count();
+    let not_decoded = report.summary.not_decoded_entries;
     if not_decoded != 0 {
-        report.unknowns.push(Unknown {
+        report.retain_unknown(Unknown {
             code: "business_payloads_not_decoded".to_owned(),
             structure_path: "wal.entries[*].payload".to_owned(),
             reason: format!(
@@ -606,7 +614,7 @@ fn finish_with_tail(
             .min(report.input.file_size);
         report.tail = analyze_tail_bytes(file, tail_origin, report.input.file_size)?;
         if report.tail.zero_suffix_length != 0 && report.first_unparsed_offset.is_some() {
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "zero_filled_tail",
                 Severity::Warning,
                 "A nonempty all-zero suffix reaches EOF in the unparsed or integrity-failed region.",
@@ -635,7 +643,7 @@ fn finish_with_tail(
             && report.tail.all_zero == Some(false)
             && report.status != WalStatus::ResourceLimitReached
         {
-            report.findings.push(finding(
+            report.retain_finding(finding(
                 "unparsed_trailing_data",
                 Severity::Error,
                 "Nonzero bytes remain after the first structural position where frame parsing stopped.",
@@ -678,7 +686,7 @@ fn analyze_tail_bytes(
             break;
         }
         for (index, byte) in buffer[..count].iter().enumerate() {
-            let absolute = position + index as u64;
+            let absolute = position.saturating_add(index as u64);
             if *byte == 0 {
                 zero_run_start.get_or_insert(absolute);
             } else {
@@ -686,7 +694,13 @@ fn analyze_tail_bytes(
                 zero_run_start = None;
             }
         }
-        position += count as u64;
+        position = position
+            .checked_add(count as u64)
+            .ok_or_else(|| WalInspectError::Io {
+                operation: "advance read offset",
+                offset: position,
+                source: io::Error::new(io::ErrorKind::InvalidData, "WAL offset overflow"),
+            })?;
     }
     if let Some(start) = zero_run_start {
         result.zero_suffix_offset = Some(start);
@@ -705,7 +719,13 @@ fn checksum_payload(
     let mut prefix = Vec::with_capacity(length.min(prefix_limit as u64) as usize);
     let mut buffer = vec![0_u8; IO_BUFFER_SIZE];
     let mut position = offset;
-    let end = offset + length;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| WalInspectError::Io {
+            operation: "compute Payload end",
+            offset,
+            source: io::Error::new(io::ErrorKind::InvalidData, "WAL Payload end overflow"),
+        })?;
     while position < end {
         let wanted = (end - position).min(buffer.len() as u64) as usize;
         let count = read_at(file, position, &mut buffer[..wanted])?;
@@ -720,7 +740,13 @@ fn checksum_payload(
         let prefix_remaining = prefix_limit.saturating_sub(prefix.len());
         let copied = prefix_remaining.min(count);
         prefix.extend_from_slice(&buffer[..copied]);
-        position += count as u64;
+        position = position
+            .checked_add(count as u64)
+            .ok_or_else(|| WalInspectError::Io {
+                operation: "advance read offset",
+                offset: position,
+                source: io::Error::new(io::ErrorKind::InvalidData, "WAL offset overflow"),
+            })?;
     }
     Ok((checksum.finalize(), prefix))
 }
@@ -729,7 +755,11 @@ fn parse_wal_frame(bytes: [u8; 16], offset: u64) -> WalFrameHeader {
     duckdb_format::wal::parse_wal_frame_header(bytes, offset)
 }
 
-fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<usize, WalInspectError> {
+fn read_at<R: Read + Seek>(
+    file: &mut R,
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<usize, WalInspectError> {
     file.seek(SeekFrom::Start(offset))
         .map_err(|source| WalInspectError::Io {
             operation: "seek",
@@ -745,7 +775,7 @@ fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<usize, Wal
             Err(source) => {
                 return Err(WalInspectError::Io {
                     operation: "read",
-                    offset: offset + total as u64,
+                    offset: offset.saturating_add(total as u64),
                     source,
                 });
             }
@@ -754,14 +784,18 @@ fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<usize, Wal
     Ok(total)
 }
 
-fn read_exact_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<(), WalInspectError> {
+fn read_exact_at<R: Read + Seek>(
+    file: &mut R,
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), WalInspectError> {
     let count = read_at(file, offset, buffer)?;
     if count == buffer.len() {
         Ok(())
     } else {
         Err(WalInspectError::Io {
             operation: "read",
-            offset: offset + count as u64,
+            offset: offset.saturating_add(count as u64),
             source: io::Error::new(io::ErrorKind::UnexpectedEof, "short WAL read"),
         })
     }
@@ -794,7 +828,7 @@ fn stream_sha256(file: &mut File) -> Result<String, WalInspectError> {
 }
 
 fn resource_finding(report: &mut WalReport, resource: &str, actual: u64, limit: u64, offset: u64) {
-    report.findings.push(finding(
+    report.retain_finding(finding(
         "resource_limit_reached",
         Severity::Warning,
         "A configured WAL inspection resource limit was reached; remaining structures were not examined.",
@@ -821,6 +855,7 @@ fn finding(
 ) -> Finding {
     Finding {
         code: code.to_owned(),
+        category: duckdb_report::FindingCategory::for_code(code),
         severity,
         message: message.into(),
         location,
@@ -924,5 +959,34 @@ mod tests {
             checksum_payload(&mut file, 0, payload.len() as u64, 17).expect("checksum");
         assert_eq!(checksum, duckdb_checksum(&payload));
         assert_eq!(prefix, payload[..17]);
+    }
+
+    struct ShortReads(std::io::Cursor<Vec<u8>>);
+
+    impl Read for ShortReads {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(2);
+            self.0.read(&mut buffer[..limit])
+        }
+    }
+
+    impl Seek for ShortReads {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.0.seek(position)
+        }
+    }
+
+    #[test]
+    fn exact_reads_join_short_reads_and_reject_early_eof() {
+        let mut reader = ShortReads(std::io::Cursor::new(vec![3; 16]));
+        let mut buffer = [0_u8; 16];
+        read_exact_at(&mut reader, 0, &mut buffer).expect("joined short reads");
+        assert_eq!(buffer, [3; 16]);
+
+        let mut reader = ShortReads(std::io::Cursor::new(vec![3; 15]));
+        let error = read_exact_at(&mut reader, 0, &mut buffer).expect_err("early EOF");
+        assert!(
+            matches!(error, WalInspectError::Io { source, .. } if source.kind() == io::ErrorKind::UnexpectedEof)
+        );
     }
 }
